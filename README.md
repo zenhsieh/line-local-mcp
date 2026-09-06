@@ -13,6 +13,22 @@ without automating the LINE UI or granting the model permission to send messages
 > compatible local archive API and are responsible for complying with applicable
 > terms and laws.
 
+## Try it in two minutes (synthetic demo data)
+
+No archive, no account, no setup. `examples/demo_archive.py` is a zero-dependency
+stdlib script that serves the full archive API contract below over invented
+contacts, messages, and attachments—an image, a text note, a PDF, and a video clip
+with a MIME type the default allow list refuses. Nothing here is real LINE data.
+
+```bash
+python3 examples/demo_archive.py
+```
+
+It prints a bearer token and a ready-to-run `claude mcp add` command; paste that
+command, then ask Claude to list your LINE chats, read the demo image, or read the
+text note (its fake password will come back redacted). Loopback-only, and nothing
+is written to disk. Ctrl-C stops it.
+
 ## Why this exists
 
 Existing LINE MCP projects generally target LINE Official Accounts or automate the
