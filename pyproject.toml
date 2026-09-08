@@ -29,9 +29,9 @@ line-local-mcp = "line_local_mcp.server:main"
 line-local-pipeline = "line_local_mcp.pipeline:main"
 
 [project.urls]
-Homepage = "https://github.com/allencyhsieh/line-local-mcp"
-Repository = "https://github.com/allencyhsieh/line-local-mcp"
-Issues = "https://github.com/allencyhsieh/line-local-mcp/issues"
+Homepage = "https://github.com/zenhsieh/line-local-mcp"
+Repository = "https://github.com/zenhsieh/line-local-mcp"
+Issues = "https://github.com/zenhsieh/line-local-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/line_local_mcp"]

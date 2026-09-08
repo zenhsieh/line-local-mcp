@@ -84,7 +84,7 @@ token to stdout:
 claude mcp add --scope user --transport stdio line-local \
   --env LINE_API_BASE=https://your-private-archive.example \
   --env 'LINE_API_TOKEN_COMMAND=your-password-manager read line-archive-token' \
-  -- uvx --from git+https://github.com/allencyhsieh/line-local-mcp line-local-mcp
+  -- uvx --from git+https://github.com/zenhsieh/line-local-mcp line-local-mcp
 ```
 
 For a quick local setup, `LINE_API_TOKEN` is also accepted, but the value may be
@@ -94,7 +94,7 @@ stored in the MCP host's configuration:
 claude mcp add --scope user --transport stdio line-local \
   --env LINE_API_BASE=http://127.0.0.1:8765 \
   --env LINE_API_TOKEN=replace-me \
-  -- uvx --from git+https://github.com/allencyhsieh/line-local-mcp line-local-mcp
+  -- uvx --from git+https://github.com/zenhsieh/line-local-mcp line-local-mcp
 ```
 
 Verify with:
@@ -112,7 +112,7 @@ claude mcp get line-local
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/allencyhsieh/line-local-mcp",
+        "git+https://github.com/zenhsieh/line-local-mcp",
         "line-local-mcp"
       ],
       "env": {
@@ -267,7 +267,7 @@ safe migration procedure from a project-specific watcher.
 ## Development
 
 ```bash
-git clone https://github.com/allencyhsieh/line-local-mcp
+git clone https://github.com/zenhsieh/line-local-mcp
 cd line-local-mcp
 uv sync --extra dev
 uv run pytest
