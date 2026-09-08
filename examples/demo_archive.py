@@ -486,7 +486,7 @@ def main() -> None:
         "  claude mcp add --scope user --transport stdio line-demo \\\n"
         f"    --env LINE_API_BASE={base_url} \\\n"
         f"    --env LINE_API_TOKEN={server.token} \\\n"  # type: ignore[attr-defined]
-        "    -- uvx --from git+https://github.com/allencyhsieh/line-local-mcp line-local-mcp",
+        "    -- uvx --from git+https://github.com/zenhsieh/line-local-mcp line-local-mcp",
         file=sys.stderr,
     )
     print(file=sys.stderr)
