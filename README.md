@@ -202,6 +202,52 @@ export LINE_MCP_MEDIA_MIME_ALLOW='image/*,text/*,application/pdf,application/zip
 - `line_list_attachments` (media mode `metadata` or `full`)
 - `line_read_media` (media mode `full`)
 
+## Optional event pipeline
+
+`line-local-pipeline` turns the same read-only archive into a small operations
+pipeline without adding any LINE write capability:
+
+```text
+archive/MCP -> watcher + deduplication -> per-profile JSONL inbox
+                                         |-> permanent-number Markdown tasks
+                                         |-> terminal dashboard
+                                         `-> optional agent notification
+```
+
+Each configured profile has its own contact aliases, state directory, inbox, task
+file, project label, and agent-target policy. Copy `pipeline.example.toml` outside
+the repository, keep secrets in that private file or its environment, then bootstrap
+the current archive position before enabling a timer:
+
+```bash
+line-local-pipeline --config ~/.config/line-local-mcp/pipeline.toml \
+  watch example --bootstrap
+line-local-pipeline --config ~/.config/line-local-mcp/pipeline.toml run example
+line-local-pipeline --config ~/.config/line-local-mcp/pipeline.toml \
+  todo example add "Confirm the delivery rule" --status 待問
+line-local-pipeline --config ~/.config/line-local-mcp/pipeline.toml dashboard example --watch
+```
+
+Task numbers are monotonically allocated and never reused after completion or
+deletion. The JSONL inbox is durable: an agent notification is marked delivered only
+after its configured command succeeds. Notification is disabled by default. There is
+no built-in Herdr pane discovery and no pane id is persisted; a deployment may name a
+stable agent explicitly or provide a resolver command that must return exactly one
+target. The prompt always receives an archive event, never authority to reply to LINE
+or mutate a live system.
+
+User-level systemd templates are included in `systemd/`. Install them in
+`~/.config/systemd/user/`, ensure `line-local-pipeline` is on the service PATH, and
+enable one isolated timer per profile:
+
+```bash
+systemctl --user enable --now line-local-pipeline@example.timer
+journalctl --user -u line-local-pipeline@example.service
+```
+
+See [PIPELINE.md](PIPELINE.md) for the profile schema, deployment checklist, and a
+safe migration procedure from a project-specific watcher.
+
 ## Configuration
 
 | Variable | Required | Default |

@@ -1,0 +1,11 @@
+[Unit]
+Description=Poll read-only LINE archive for profile %i
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

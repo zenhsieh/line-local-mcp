@@ -1,0 +1,13 @@
+[Unit]
+Description=Collect read-only LINE archive events for profile %i
+
+[Service]
+Type=oneshot
+Environment=LINE_PIPELINE_CONFIG=%h/.config/line-local-mcp/pipeline.toml
+ExecStart=/usr/bin/env line-local-pipeline --config ${LINE_PIPELINE_CONFIG} run %i
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state %h/.local/share

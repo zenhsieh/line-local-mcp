@@ -1,0 +1,36 @@
+# Copy outside the repository. Profiles have isolated state, aliases and tasks.
+[profiles.example]
+project_label = "Example Project"
+contact = "Canonical Contact"
+incoming_aliases = ["Canonical Contact", "Former Display Name"]
+state_dir = "~/.local/state/line-local-pipeline/example"
+todo_file = "~/.local/share/line-local-pipeline/example-tasks.md"
+poll_limit = 200
+keep_fingerprints = 2000
+
+# Either define a direct stdio command ...
+[profiles.example.mcp]
+command = ["/path/to/venv/bin/line-local-mcp"]
+env = { LINE_API_BASE = "http://127.0.0.1:8765", LINE_API_TOKEN = "replace-via-private-config" }
+
+# ... or load one named server from a Claude-compatible MCP JSON config:
+# config_file = "~/.claude.json"
+# server_name = "line-local"
+
+# Safe default: durable inbox collection works, but no agent receives prompts.
+[profiles.example.injection]
+enabled = false
+target_strategy = "disabled"
+prompt_template = "[{project_label} LINE] Review this event. Never reply to LINE: {prompt}"
+
+# Explicit stable agent name (never a hard-coded pane id):
+# enabled = true
+# target_strategy = "explicit"
+# target = "project-review-agent"
+# agent_command = ["your-agent-cli", "prompt", "{target}", "{prompt}"]
+
+# Or resolve exactly one target through a site-owned, fail-closed helper:
+# enabled = true
+# target_strategy = "resolver-command"
+# target_resolver_command = ["/usr/local/bin/resolve-project-agent", "example"]
+# agent_command = ["your-agent-cli", "prompt", "{target}", "{prompt}"]
