@@ -41,6 +41,34 @@ Agent delivery supports only these target strategies:
 `{project_label}` placeholders. It is executed without a shell. Never configure it to
 call a LINE-send command.
 
+## If you fork this to add sending
+
+This project stops at notification on purpose: nothing in `line-local-mcp` or this
+pipeline can send, mark-read, or otherwise mutate LINE, so the trust boundary is easy
+to state and easy to audit. Closing the loop from "agent drafted a reply" to "LINE
+received it" is a materially different risk and belongs in your fork, not here—but if
+you build it, the shape of the risk is the same regardless of which archive or send API
+you're driving:
+
+- **This is account automation, not a business integration.** A personal LINE account
+  sending programmatically, through any channel, risks the account itself—no test
+  suite catches "LINE decided this looks like a bot."
+- **A draft is not a send.** Wire the agent's output to a queue a human confirms, the
+  same way `resolver-command` must resolve to exactly one target or fail closed
+  (`_resolve_target` above)—never let agent output reach a send call unreviewed.
+- **Rate-limit and de-duplicate independently of the agent.** An agent that retries,
+  loops, or gets asked twice should not be able to cause two sends; use the same
+  fingerprint-before-append discipline `watch()` already uses for the inbox.
+- **Log every send attempt with an idempotency key**, durably, before the network call—
+  not after—so a crash mid-send is a replay-safe retry, not a silent double-send or a
+  silent loss.
+- **A send-capable credential is a different asset than a read-only one.** Do not reuse
+  the archive's bearer token or its storage; scope and rotate it separately, and assume
+  its compromise is worse.
+- **Keep it out of this package.** A send path changes what every consumer of
+  `line-local-mcp` needs to audit, even ones who never enable it. Ship it as a separate,
+  clearly-labeled module in your fork.
+
 ## Migrating an existing project watcher
 
 Do not switch a live watcher in place. This sequence prevents replay and preserves an
