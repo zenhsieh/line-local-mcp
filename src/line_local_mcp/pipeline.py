@@ -75,6 +75,15 @@ class Profile:
     def injection_state_file(self) -> Path:
         return self.state_dir / "injection-state.json"
 
+    @property
+    def injection_override_file(self) -> Path:
+        """Runtime switch written by the cockpit; absent means follow the profile."""
+        return self.state_dir / "injection-override.json"
+
+    @property
+    def injection_configured(self) -> bool:
+        return self.injection_enabled and self.target_strategy != "disabled"
+
 
 def _expand(value: str) -> str:
     return os.path.expandvars(os.path.expanduser(value))
@@ -372,9 +381,47 @@ def _render_argv(parts: tuple[str, ...], values: dict[str, str]) -> list[str]:
     return [PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], part) for part in parts]
 
 
+def injection_switch(profile: Profile) -> bool | None:
+    """The runtime override: True/False when the cockpit set one, None when untouched."""
+    value = _load_json(profile.injection_override_file, {}).get("enabled")
+    return value if isinstance(value, bool) else None
+
+
+def injection_active(profile: Profile) -> bool:
+    """Configured in the profile *and* not paused at runtime."""
+    return profile.injection_configured and injection_switch(profile) is not False
+
+
+def set_injection_switch(profile: Profile, enabled: bool) -> dict[str, Any]:
+    """Flip the runtime switch.  Turning it on never replays the backlog.
+
+    Everything already in the inbox while injection was off has been visible on the
+    dashboard and in the task file; it is marked as seen so only events that arrive
+    from now on reach the agent.
+    """
+    skipped = 0
+    if enabled:
+        state = _load_json(profile.injection_state_file, {"seen": []})
+        seen = list(state.get("seen", []))
+        seen_set = set(seen)
+        for fingerprint, _event in inbox_rows(profile):
+            if fingerprint not in seen_set:
+                seen.append(fingerprint)
+                seen_set.add(fingerprint)
+                skipped += 1
+        _write_private(profile.injection_state_file, {"seen": seen[-profile.keep_fingerprints :]})
+    _write_private(profile.injection_override_file, {
+        "enabled": enabled,
+        "changed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    })
+    return {"enabled": enabled, "configured": profile.injection_configured, "backlog_skipped": skipped}
+
+
 def inject_pending(profile: Profile) -> dict[str, int]:
-    if not profile.injection_enabled or profile.target_strategy == "disabled":
-        return {"sent": 0, "failed": 0, "disabled": 1}
+    if not profile.injection_configured:
+        return {"sent": 0, "failed": 0, "disabled": 1, "paused": 0}
+    if injection_switch(profile) is False:
+        return {"sent": 0, "failed": 0, "disabled": 0, "paused": 1}
     if not profile.agent_command:
         raise RuntimeError("injection.agent_command is required when injection is enabled")
     state = _load_json(profile.injection_state_file, {"seen": []})
@@ -410,7 +457,7 @@ def inject_pending(profile: Profile) -> dict[str, int]:
         seen_set.add(fingerprint)
         _write_private(profile.injection_state_file, {"seen": seen[-profile.keep_fingerprints :]})
         sent += 1
-    return {"sent": sent, "failed": failed, "disabled": 0}
+    return {"sent": sent, "failed": failed, "disabled": 0, "paused": 0}
 
 
 def ensure_task_ids(profile: Profile) -> list[str]:

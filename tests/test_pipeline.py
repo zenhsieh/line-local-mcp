@@ -76,7 +76,7 @@ def test_injection_is_off_by_default_and_does_not_consume_inbox(tmp_path):
     _config, profile = write_config(tmp_path)
     profile.state_dir.mkdir(parents=True)
     profile.inbox_file.write_text('{"messages": [{"text": "hello"}]}\n', encoding="utf-8")
-    assert inject_pending(profile) == {"sent": 0, "failed": 0, "disabled": 1}
+    assert inject_pending(profile) == {"sent": 0, "failed": 0, "disabled": 1, "paused": 0}
     assert not profile.injection_state_file.exists()
 
 
@@ -93,7 +93,7 @@ agent_command = ["/bin/true", "{target}", "{prompt}"]
     profile.inbox_file.write_text(
         json.dumps({"messages": [{"text": "hello"}]}) + "\n", encoding="utf-8"
     )
-    assert inject_pending(profile) == {"sent": 0, "failed": 1, "disabled": 0}
+    assert inject_pending(profile) == {"sent": 0, "failed": 1, "disabled": 0, "paused": 0}
     assert not profile.injection_state_file.exists()
 
 

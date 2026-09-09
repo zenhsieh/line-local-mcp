@@ -32,7 +32,10 @@ from .pipeline import (
     ensure_task_ids,
     inbox_rows,
     inject_pending,
+    injection_active,
+    injection_switch,
     load_profile,
+    set_injection_switch,
     todo_add,
     watch,
 )
@@ -252,14 +255,16 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
 
     pending_tab = f" 待辦 {len(pending)} "
     completed_tab = f" 已完成 {len(completed)} "
-    controls = pending_tab + "  " + completed_tab + "  點選｜← →｜滾輪"
+    toggle_tab, toggle_color = _injection_badge(profile, blink_on)
+    controls = pending_tab + "  " + completed_tab + "  " + toggle_tab + "  點選｜← →｜i 注入｜滾輪"
     sync = f"更新 {datetime.now().astimezone():%H:%M} 同步 {_hhmm(state.get('last_checked_at'))}"
     title = f"{profile.contact} LINE"
     lines.append(
         ("\033[1;30;46m" if active_tab == "pending" else "\033[2;37m")
         + pending_tab + RESET + "  "
         + ("\033[1;30;46m" if active_tab == "completed" else "\033[2;37m")
-        + completed_tab + RESET + DIM + "  點選｜← →｜滾輪" + RESET
+        + completed_tab + RESET + "  "
+        + toggle_color + toggle_tab + RESET + DIM + "  點選｜← →｜i 注入｜滾輪" + RESET
         + " " * max(0, left_width - _width(controls)) + DIM + " │ " + RESET
         + BOLD + "\033[38;5;109m" + title + RESET
         + " " * max(1, right_width - _width(title) - _width(sync) - 2)
@@ -270,20 +275,46 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     return offset
 
 
-def _handle_input(data: str, active_tab: str, offset: int, bottom_row: int) -> tuple[str, int]:
+TOGGLE_TEXT = {True: " 注入 ON ", False: " 注入 OFF ", None: " 注入 — "}
+
+
+def _injection_badge(profile: Profile, blink_on: bool) -> tuple[str, str]:
+    """Bottom-bar badge for the runtime injection switch.  None = not configured."""
+    if not profile.injection_configured:
+        return TOGGLE_TEXT[None], "\033[2;37m"
+    if injection_active(profile):
+        return TOGGLE_TEXT[True], "\033[1;30;42m" if blink_on else "\033[1;30;40;32m"
+    return TOGGLE_TEXT[False], "\033[1;37;41m"
+
+
+def toggle_injection(profile: Profile) -> dict[str, Any] | None:
+    """Flip the switch from the dashboard.  No-op when the profile has no injection."""
+    if not profile.injection_configured:
+        return None
+    return set_injection_switch(profile, not injection_active(profile))
+
+
+def _handle_input(
+    data: str, active_tab: str, offset: int, bottom_row: int, profile: Profile | None = None
+) -> tuple[str, int]:
     if "\x1b[D" in data:
         active_tab, offset = "pending", 0
     if "\x1b[C" in data or "\t" in data:
         active_tab, offset = "completed", 0
+    if profile is not None and ("i" in data or "I" in data) and "\x1b" not in data:
+        toggle_injection(profile)
     for button, x, y, action in MOUSE_RE.findall(data):
         button, x, y = int(button), int(x), int(y)
         if action == "M" and button == 0 and y == bottom_row:
             pending_end = _width(" 待辦 99 ")
             completed_end = pending_end + 2 + _width(" 已完成 99 ")
+            toggle_end = completed_end + 2 + _width(TOGGLE_TEXT[False])
             if x <= pending_end:
                 active_tab, offset = "pending", 0
             elif pending_end + 2 < x <= completed_end:
                 active_tab, offset = "completed", 0
+            elif completed_end + 2 < x <= toggle_end and profile is not None:
+                toggle_injection(profile)
         elif button == 64:
             offset = max(0, offset - 1)
         elif button == 65:
@@ -301,7 +332,7 @@ def dashboard(profile: Profile, watch_mode: bool, interval: float) -> None:
             sys.stdout.write("\033[?1049h\033[?1000h\033[?1006h")
         while True:
             blink_on = bool(int(time.monotonic() * 1.6) % 2)
-            signature = repr((dashboard_snapshot(profile), active_tab, offset, shutil.get_terminal_size(), blink_on))
+            signature = repr((dashboard_snapshot(profile), active_tab, offset, shutil.get_terminal_size(), blink_on, injection_switch(profile)))
             if signature != previous:
                 offset = _render(profile, active_tab, offset, blink_on)
                 previous = signature
@@ -312,7 +343,7 @@ def dashboard(profile: Profile, watch_mode: bool, interval: float) -> None:
             if ready:
                 data = os.read(stdin_fd, 256).decode("utf-8", "ignore")
                 bottom_row = min(10, shutil.get_terminal_size().lines - 1) + 1
-                active_tab, offset = _handle_input(data, active_tab, offset, bottom_row)
+                active_tab, offset = _handle_input(data, active_tab, offset, bottom_row, profile)
                 previous = None
     finally:
         if old_termios:
@@ -334,6 +365,9 @@ def _parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument("profile")
     dashboard_parser.add_argument("--watch", action="store_true")
     dashboard_parser.add_argument("--interval", type=float, default=2.0)
+    injection_parser = commands.add_parser("injection", help="runtime switch: on|off|status")
+    injection_parser.add_argument("profile")
+    injection_parser.add_argument("action", choices=["on", "off", "status"])
     return parser
 
 
@@ -343,6 +377,14 @@ def main() -> int:
         profile = load_profile(args.config, args.profile)
         if args.command == "dashboard":
             dashboard(profile, args.watch, args.interval)
+            return 0
+        if args.command == "injection":
+            if args.action == "status":
+                status = {"configured": profile.injection_configured,
+                          "switch": injection_switch(profile), "active": injection_active(profile)}
+            else:
+                status = set_injection_switch(profile, args.action == "on")
+            print(json.dumps(status, ensure_ascii=False, sort_keys=True))
             return 0
         with _cockpit_lock(profile.state_dir):
             if args.command == "reconcile":
