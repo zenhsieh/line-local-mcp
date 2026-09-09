@@ -25,10 +25,43 @@ pending/completed tasks and recent LINE input in a two-column terminal view. Pro
 labels, contacts, paths and agent targets remain private profile configuration; they
 are never compiled into the shared tool.
 
+## Collector and local mirror (one writer per database)
+
+The archive on the LINE machine is SQLite, and SQLite allows one writer at a time.
+Two watchers that each call `/sync` on the same schedule therefore make every other
+sync fail with `database is locked`.  The fix is structural, not a timer offset:
+
+```text
+LINE machine                  this host
+archive.sqlite  ── /sync ──▶  line-local-collector  ──▶  mirror.sqlite (WAL, one writer)
+   one writer      one caller                              ▲  ▲  ▲
+                                                           watchers read only
+```
+
+- `line-local-collector run` is the **only** process on this host that calls the
+  archive.  It takes a non-blocking lock (overlapping runs skip), triggers one
+  `/sync`, pulls every chat in `collector.chats`, and appends unseen events to the
+  mirror with the same fingerprints the watchers already use.
+- A sync that comes back as a traceback or an error is recorded in the mirror's
+  `meta` table (`last_sync_error`) and in the run's JSON output.  The pull still
+  happens, because another caller may have refreshed the archive.
+- Watchers with `source = "mirror"` never open the network or an MCP subprocess.
+  They read the newest `poll_limit` rows for their contact from the mirror and run
+  the unchanged seen-set / inbox / task logic.  Their `watch-state.json` shows the
+  collector's `last_collected_at` and `last_sync_error` so staleness is visible.
+- The mirror is opened in WAL mode with a busy timeout.  Readers never block the
+  writer and the writer never blocks readers.  Do not add a second writer.
+
+Install `systemd/line-local-collector.{service,timer}` once per host, then switch
+profiles to `source = "mirror"` one at a time following the migration steps below.
+Interactive MCP sessions should stop calling `line_sync`; the collector keeps the
+archive fresh.
+
 ## Profile schema
 
 See `pipeline.example.toml`. Required profile keys are `project_label`, `contact`,
-`state_dir`, and `todo_file`. `incoming_aliases` should include every sender display
+`state_dir`, and `todo_file`.  `source` is `mcp` (default) or `mirror`; a mirror
+profile needs `mirror_db` or a host-wide `[collector]` table. `incoming_aliases` should include every sender display
 name which represents that contact. Files from different customers must never share a
 state directory.
 

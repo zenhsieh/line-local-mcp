@@ -28,6 +28,7 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.25", "pytest-cov>=5.0", "ruff>=0.9"]
 line-local-mcp = "line_local_mcp.server:main"
 line-local-pipeline = "line_local_mcp.pipeline:main"
 line-local-case-cockpit = "line_local_mcp.cockpit:main"
+line-local-collector = "line_local_mcp.mirror:main"
 
 [project.urls]
 Homepage = "https://github.com/zenhsieh/line-local-mcp"

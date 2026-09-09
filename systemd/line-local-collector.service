@@ -1,0 +1,19 @@
+[Unit]
+Description=Single-writer collector: sync the read-only LINE archive into the local mirror
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=LINE_PIPELINE_CONFIG=%h/.config/line-local-mcp/pipeline.toml
+ExecStart=/usr/bin/env line-local-collector --config ${LINE_PIPELINE_CONFIG} run
+UMask=0077
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state %h/.local/share
+
+[Install]
+WantedBy=default.target

@@ -56,6 +56,8 @@ class Profile:
     target_resolver_command: tuple[str, ...]
     agent_command: tuple[str, ...]
     prompt_template: str
+    source: str = "mcp"
+    mirror_db: Path | None = None
 
     @property
     def state_file(self) -> Path:
@@ -98,9 +100,21 @@ def load_profile(config_path: Path, name: str) -> Profile:
     injection = raw.get("injection", {})
     if not isinstance(mcp, dict) or not isinstance(injection, dict):
         raise ValueError("mcp and injection must be TOML tables")  # noqa: TRY004
+    source = str(raw.get("source", "mcp"))
+    if source not in {"mcp", "mirror"}:
+        raise ValueError("source must be mcp or mirror")
+    mirror_db = str(raw.get("mirror_db", "")).strip()
+    if source == "mirror" and not mirror_db:
+        # fall back to the host-wide collector's database
+        from .mirror import mirror_db_from_config
+
+        shared = mirror_db_from_config(config_path)
+        if shared is None:
+            raise ValueError("source = mirror needs mirror_db or a [collector] table")
+        mirror_db = str(shared)
     direct_command = mcp.get("command", [])
     config_file = mcp.get("config_file")
-    if not direct_command and not config_file:
+    if source == "mcp" and not direct_command and not config_file:
         raise ValueError("configure either mcp.command or mcp.config_file")
     env = mcp.get("env", {})
     if not isinstance(env, dict) or not all(
@@ -139,6 +153,8 @@ def load_profile(config_path: Path, name: str) -> Profile:
                 "do not reply to LINE or mutate live systems. Event: {prompt}",
             )
         ),
+        source=source,
+        mirror_db=Path(_expand(mirror_db)) if mirror_db else None,
     )
 
 
@@ -198,7 +214,33 @@ def _tool_json(result: Any) -> dict[str, Any]:
     raise RuntimeError("LINE MCP tool returned no JSON object")
 
 
+def _fetch_from_mirror(profile: Profile) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
+    """Read the newest rows for this contact from the host-wide mirror.  No network."""
+    from .mirror import Mirror
+
+    assert profile.mirror_db is not None
+    if not profile.mirror_db.exists():
+        raise RuntimeError(f"mirror database {profile.mirror_db} does not exist yet; run the collector")
+    mirror = Mirror(profile.mirror_db, readonly=True)
+    try:
+        messages = [row for _fp, row in mirror.latest(profile.contact, "message", profile.poll_limit)]
+        attachments = [
+            row for _fp, row in mirror.latest(profile.contact, "attachment", profile.poll_limit)
+        ]
+        sync = {
+            "source": "mirror",
+            "last_collected_at": mirror.get_meta("last_collected_at"),
+            "last_sync": mirror.get_meta("last_sync"),
+            "last_sync_error": mirror.get_meta("last_sync_error"),
+        }
+    finally:
+        mirror.close()
+    return messages, attachments, sync
+
+
 async def _fetch(profile: Profile) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
+    if profile.source == "mirror":
+        return _fetch_from_mirror(profile)
     async with (
         stdio_client(_server_parameters(profile)) as streams,
         ClientSession(*streams) as session,

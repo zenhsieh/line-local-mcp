@@ -1,3 +1,11 @@
+# Host-wide collector: the only process that talks to the archive.  One per host.
+[collector]
+mirror_db = "~/.local/state/line-local-pipeline/mirror.sqlite"
+chats = ["Canonical Contact", "Another Contact"]
+poll_limit = 200
+trigger_sync = true
+env = { LINE_API_BASE = "https://archive.example.ts.net", LINE_API_TOKEN_COMMAND = "~/.local/bin/line-local-token" }
+
 # Copy outside the repository. Profiles have isolated state, aliases and tasks.
 [profiles.example]
 project_label = "Example Project"
@@ -7,6 +15,9 @@ state_dir = "~/.local/state/line-local-pipeline/example"
 todo_file = "~/.local/share/line-local-pipeline/example-tasks.md"
 poll_limit = 200
 keep_fingerprints = 2000
+# source = "mirror" reads the collector's database instead of calling the archive.
+# With source = "mirror" the [profiles.example.mcp] table below is not needed.
+source = "mcp"
 
 # Either define a direct stdio command ...
 [profiles.example.mcp]
