@@ -17,6 +17,14 @@ the user-owned archive to refresh”; every LINE-facing operation remains read-o
 5. `inject` is optional and disabled by default. A failed notification remains unseen
    and is retried. Commands are argument arrays, never shell strings.
 
+`line-local-case-cockpit` is the reusable interactive composition extracted from
+two independently operated case dashboards. Its `run` command performs one read-only watch,
+creates exactly one durable task for every new inbox event, and then invokes the
+same optional fail-closed injection contract. Its `dashboard --watch` command shows
+pending/completed tasks and recent LINE input in a two-column terminal view. Project
+labels, contacts, paths and agent targets remain private profile configuration; they
+are never compiled into the shared tool.
+
 ## Profile schema
 
 See `pipeline.example.toml`. Required profile keys are `project_label`, `contact`,

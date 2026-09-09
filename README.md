@@ -228,6 +228,20 @@ line-local-pipeline --config ~/.config/line-local-mcp/pipeline.toml \
 line-local-pipeline --config ~/.config/line-local-mcp/pipeline.toml dashboard example --watch
 ```
 
+For the full Case Cockpit composition used beside a working agent, run one
+read-only collection/reconciliation cycle and the interactive two-column view:
+
+```bash
+line-local-case-cockpit --config ~/.config/line-local-mcp/pipeline.toml run example
+line-local-case-cockpit --config ~/.config/line-local-mcp/pipeline.toml \
+  dashboard example --watch
+```
+
+The cockpit turns each new inbox event into exactly one durable Markdown task,
+even after retries or manual task deletion. It is a presentation and routing
+composition: the task file and inbox remain the durable records, and agent
+delivery still follows the disabled-by-default, fail-closed pipeline policy.
+
 Task numbers are monotonically allocated and never reused after completion or
 deletion. The JSONL inbox is durable: an agent notification is marked delivered only
 after its configured command succeeds. Notification is disabled by default. There is
