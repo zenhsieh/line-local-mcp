@@ -60,8 +60,12 @@ archive fresh.
 ## Profile schema
 
 See `pipeline.example.toml`. Required profile keys are `project_label`, `contact`,
-`state_dir`, and `todo_file`.  `source` is `mcp` (default) or `mirror`; a mirror
-profile needs `mirror_db` or a host-wide `[collector]` table. `incoming_aliases` should include every sender display
+`state_dir`, and `todo_file`.  `source` is `mcp` (default), `mirror`, or `jsonl`;
+a mirror profile needs `mirror_db` or a host-wide `[collector]` table. A JSONL
+profile needs an append-only `source_file`; every line is an object with the
+canonical message fields (`time`, `from`, `type`, `text`) and an optional
+`kind` of `message` (default) or `attachment`. The reader never modifies the
+source file. `incoming_aliases` should include every sender display
 name which represents that contact. Files from different customers must never share a
 state directory.
 

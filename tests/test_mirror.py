@@ -219,3 +219,72 @@ todo_file = "{tmp_path / 'tasks.md'}"
     )
     with pytest.raises(ValueError, match="mcp.command"):
         load_profile(config, "client")
+
+
+def test_jsonl_profile_requires_a_source_file(tmp_path):
+    config = tmp_path / "pipeline.toml"
+    config.write_text(
+        f"""
+[profiles.client]
+project_label = "Client"
+contact = "agent"
+state_dir = "{tmp_path / 'state'}"
+todo_file = "{tmp_path / 'tasks.md'}"
+source = "jsonl"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="source_file"):
+        load_profile(config, "client")
+
+
+def test_watcher_reads_jsonl_without_replaying_rows(tmp_path):
+    source = tmp_path / "events.jsonl"
+    first_event = {
+        "time": "2026-09-10T10:00:00+08:00",
+        "from": "agent-a",
+        "type": "text",
+        "text": "first verified milestone",
+    }
+    source.write_text(json.dumps(first_event) + "\n", encoding="utf-8")
+    config = tmp_path / "pipeline.toml"
+    config.write_text(
+        f"""
+[profiles.client]
+project_label = "Release case"
+contact = "agent-a"
+incoming_aliases = ["agent-a", "agent-b"]
+state_dir = "{tmp_path / 'state'}"
+todo_file = "{tmp_path / 'tasks.md'}"
+source = "jsonl"
+source_file = "{source}"
+""",
+        encoding="utf-8",
+    )
+    profile = load_profile(config, "client")
+    assert profile.mcp_command == ()
+
+    bootstrap = asyncio.run(watch(profile, bootstrap=True))
+    assert bootstrap["new_messages"] == 0
+    assert not profile.inbox_file.exists()
+
+    no_op = asyncio.run(watch(profile))
+    assert no_op["new_messages"] == 0
+
+    second_event = {
+        "time": "2026-09-10T10:01:00+08:00",
+        "from": "agent-b",
+        "type": "text",
+        "text": "second verified milestone",
+    }
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second_event) + "\n")
+
+    collected = asyncio.run(watch(profile))
+    assert collected["new_messages"] == 1
+    assert asyncio.run(watch(profile))["new_messages"] == 0
+    inbox = [json.loads(line) for line in profile.inbox_file.read_text().splitlines()]
+    assert len(inbox) == 1
+    assert inbox[0]["messages"] == [{**second_event, "chatId": None}]
+    state = json.loads(profile.state_file.read_text())
+    assert state["last_sync"]["source"] == "jsonl"

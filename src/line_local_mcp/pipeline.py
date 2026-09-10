@@ -58,6 +58,7 @@ class Profile:
     prompt_template: str
     source: str = "mcp"
     mirror_db: Path | None = None
+    source_file: Path | None = None
 
     @property
     def state_file(self) -> Path:
@@ -110,8 +111,8 @@ def load_profile(config_path: Path, name: str) -> Profile:
     if not isinstance(mcp, dict) or not isinstance(injection, dict):
         raise ValueError("mcp and injection must be TOML tables")  # noqa: TRY004
     source = str(raw.get("source", "mcp"))
-    if source not in {"mcp", "mirror"}:
-        raise ValueError("source must be mcp or mirror")
+    if source not in {"mcp", "mirror", "jsonl"}:
+        raise ValueError("source must be mcp, mirror, or jsonl")
     mirror_db = str(raw.get("mirror_db", "")).strip()
     if source == "mirror" and not mirror_db:
         # fall back to the host-wide collector's database
@@ -121,6 +122,9 @@ def load_profile(config_path: Path, name: str) -> Profile:
         if shared is None:
             raise ValueError("source = mirror needs mirror_db or a [collector] table")
         mirror_db = str(shared)
+    source_file = str(raw.get("source_file", "")).strip()
+    if source == "jsonl" and not source_file:
+        raise ValueError("source = jsonl needs source_file")
     direct_command = mcp.get("command", [])
     config_file = mcp.get("config_file")
     if source == "mcp" and not direct_command and not config_file:
@@ -164,6 +168,7 @@ def load_profile(config_path: Path, name: str) -> Profile:
         ),
         source=source,
         mirror_db=Path(_expand(mirror_db)) if mirror_db else None,
+        source_file=Path(_expand(source_file)) if source_file else None,
     )
 
 
@@ -247,9 +252,57 @@ def _fetch_from_mirror(profile: Profile) -> tuple[list[dict[str, Any]], list[dic
     return messages, attachments, sync
 
 
+def _fetch_from_jsonl(profile: Profile) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
+    """Read an append-only local event feed without modifying its cursor or bytes."""
+    assert profile.source_file is not None
+    if not profile.source_file.exists():
+        raise RuntimeError(f"JSONL source {profile.source_file} does not exist")
+
+    messages: list[dict[str, Any]] = []
+    attachments: list[dict[str, Any]] = []
+    lines = profile.source_file.read_text(encoding="utf-8").splitlines()
+    for line_number, raw in enumerate(lines, start=1):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"invalid JSONL source row {line_number} in {profile.source_file}"
+            ) from exc
+        if not isinstance(row, dict):
+            raise TypeError(
+                f"JSONL source row {line_number} in {profile.source_file} is not an object"
+            )
+        kind = str(row.get("kind", "message"))
+        event = {key: value for key, value in row.items() if key != "kind"}
+        if kind == "message":
+            messages.append(event)
+        elif kind == "attachment":
+            attachments.append(event)
+        else:
+            raise RuntimeError(
+                f"JSONL source row {line_number} has unsupported kind {kind!r}"
+            )
+
+    stat = profile.source_file.stat()
+    sync = {
+        "source": "jsonl",
+        "source_file": str(profile.source_file),
+        "line_count": len(lines),
+        "last_collected_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(
+            timespec="seconds"
+        ),
+        "last_sync_error": None,
+    }
+    return messages, attachments, sync
+
+
 async def _fetch(profile: Profile) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
     if profile.source == "mirror":
         return _fetch_from_mirror(profile)
+    if profile.source == "jsonl":
+        return _fetch_from_jsonl(profile)
     async with (
         stdio_client(_server_parameters(profile)) as streams,
         ClientSession(*streams) as session,
@@ -612,7 +665,7 @@ def main() -> int:
                     break
                 time.sleep(max(0.25, args.interval))
         return 0
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         print(f"line-local-pipeline: {exc}", file=sys.stderr)
         return 1
 
