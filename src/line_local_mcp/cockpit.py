@@ -62,7 +62,7 @@ STATUS_BADGES = {
     "[待問]": ("待問", "\033[38;5;181;48;5;52m"),
     "[待決]": ("待決", "\033[38;5;181;48;5;52m"),
 }
-TASK_TABS = ("running", "pending", "completed")
+TASK_TABS = ("pending", "completed")
 
 
 @contextmanager
@@ -248,7 +248,7 @@ def pane_progress(profile: Profile) -> list[str]:
         state = str(message.get("state", "")).lower()
         symbol = {"running": "●", "blocked": "!", "done": "✓", "waiting": "○"}.get(state, "·")
         progress = " ".join(str(message.get("progress") or message.get("text", "")).split())
-        return f"{sender} {symbol} {progress}".rstrip()
+        return f"{symbol} {sender} {progress}".rstrip()
 
     rows: list[str] = []
     if root in latest or root in children:
@@ -287,7 +287,7 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     pending, completed, events, state = dashboard_snapshot(profile)
     _task_status, _source_name, latest_title, source_title = _source_labels(profile)
     views = _task_views(pending, completed)
-    selected = views[active_tab]
+    selected = views["running"] + views["pending"] if active_tab == "pending" else completed
     if profile.source == "jsonl":
         events = pane_progress(profile)
         latest_title = "Pane 進度"
@@ -332,20 +332,17 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
             )
         lines.append(left_cell + DIM + " │ " + RESET + right_cell)
 
-    running_tab = f" 進行中 {len(views['running'])} "
-    pending_tab = f" 待辦 {len(views['pending'])} "
+    pending_tab = f" 進行／待辦 {len(views['running'])}/{len(pending)} "
     completed_tab = f" 已完成 {len(completed)} "
     toggle_tab, toggle_color = _injection_badge(profile, blink_on)
     controls = (
-        running_tab + "  " + pending_tab + "  " + completed_tab + "  " + toggle_tab
+        pending_tab + "  " + completed_tab + "  " + toggle_tab
         + "  點選｜← →｜i 注入｜滾輪"
     )
     sync = f"更新 {datetime.now().astimezone():%H:%M} 同步 {_hhmm(state.get('last_checked_at'))}"
     title = source_title
     lines.append(
-        ("\033[1;30;46m" if active_tab == "running" else "\033[2;37m")
-        + running_tab + RESET + "  "
-        + ("\033[1;30;46m" if active_tab == "pending" else "\033[2;37m")
+        ("\033[1;30;46m" if active_tab == "pending" else "\033[2;37m")
         + pending_tab + RESET + "  "
         + ("\033[1;30;46m" if active_tab == "completed" else "\033[2;37m")
         + completed_tab + RESET + "  "
@@ -391,13 +388,10 @@ def _handle_input(
     for button, x, y, action in MOUSE_RE.findall(data):
         button, x, y = int(button), int(x), int(y)
         if action == "M" and button == 0 and y == bottom_row:
-            running_end = _width(" 進行中 99 ")
-            pending_end = running_end + 2 + _width(" 待辦 99 ")
+            pending_end = _width(" 進行／待辦 99/99 ")
             completed_end = pending_end + 2 + _width(" 已完成 99 ")
             toggle_end = completed_end + 2 + _width(TOGGLE_TEXT[False])
-            if x <= running_end:
-                active_tab, offset = "running", 0
-            elif running_end + 2 < x <= pending_end:
+            if x <= pending_end:
                 active_tab, offset = "pending", 0
             elif pending_end + 2 < x <= completed_end:
                 active_tab, offset = "completed", 0
@@ -411,9 +405,7 @@ def _handle_input(
 
 
 def dashboard(profile: Profile, watch_mode: bool, interval: float) -> None:
-    pending, completed, _events, _state = dashboard_snapshot(profile)
-    active_tab = "running" if _task_views(pending, completed)["running"] else "pending"
-    offset, previous = 0, None
+    active_tab, offset, previous = "pending", 0, None
     stdin_fd = sys.stdin.fileno()
     old_termios = termios.tcgetattr(stdin_fd) if sys.stdin.isatty() else None
     try:

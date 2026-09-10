@@ -95,9 +95,7 @@ def test_dashboard_key_and_click_toggle(tmp_path):
     assert injection_active(profile) is False
     # a click on the badge (just right of the two tabs) toggles back on
     x = (
-        _width(" 進行中 99 ")
-        + 2
-        + _width(" 待辦 99 ")
+        _width(" 進行／待辦 99/99 ")
         + 2
         + _width(" 已完成 99 ")
         + 2

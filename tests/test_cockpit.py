@@ -156,6 +156,6 @@ def test_pane_progress_keeps_latest_event_and_renders_hierarchy(tmp_path):
     profile.inbox_file.write_text("\n".join(json.dumps(row) for row in events) + "\n", encoding="utf-8")
 
     assert pane_progress(profile) == [
-        "Synthetic Contact · Control",
-        "└─ worker_x ✓ Second step",
+        "· Synthetic Contact Control",
+        "└─ ✓ worker_x Second step",
     ]
