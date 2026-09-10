@@ -62,6 +62,7 @@ STATUS_BADGES = {
     "[待問]": ("待問", "\033[38;5;181;48;5;52m"),
     "[待決]": ("待決", "\033[38;5;181;48;5;52m"),
 }
+TASK_TABS = ("running", "pending", "completed")
 
 
 @contextmanager
@@ -215,6 +216,67 @@ def dashboard_snapshot(
     return pending, completed, events, _load_json(profile.state_file, {})
 
 
+def pane_progress(profile: Profile) -> list[str]:
+    """Return the latest milestone per pane as a compact parent/child tree."""
+
+    latest: dict[str, tuple[str, int, dict[str, Any]]] = {}
+    event_index = 0
+    for _fingerprint, event in inbox_rows(profile):
+        for message in event.get("messages", []):
+            sender = " ".join(str(message.get("from", "")).split())
+            if not sender or message.get("type", "text") != "text":
+                continue
+            event_index += 1
+            candidate = (str(message.get("time", "")), event_index, message)
+            if sender not in latest or candidate[:2] > latest[sender][:2]:
+                latest[sender] = candidate
+    if not latest:
+        return []
+
+    root = profile.contact
+    children: dict[str, list[str]] = {}
+    for sender, (_timestamp, _index, message) in latest.items():
+        if sender == root:
+            continue
+        parent = " ".join(str(message.get("parent") or root).split()) or root
+        children.setdefault(parent, []).append(sender)
+    for senders in children.values():
+        senders.sort(key=lambda sender: latest[sender][:2], reverse=True)
+
+    def summary(sender: str) -> str:
+        _timestamp, _index, message = latest[sender]
+        state = str(message.get("state", "")).lower()
+        symbol = {"running": "●", "blocked": "!", "done": "✓", "waiting": "○"}.get(state, "·")
+        progress = " ".join(str(message.get("progress") or message.get("text", "")).split())
+        return f"{sender} {symbol} {progress}".rstrip()
+
+    rows: list[str] = []
+    if root in latest or root in children:
+        rows.append(summary(root) if root in latest else root)
+
+    def visit(parent: str, prefix: str = "") -> None:
+        direct = children.get(parent, [])
+        for index, sender in enumerate(direct):
+            last = index == len(direct) - 1
+            rows.append(prefix + ("└─ " if last else "├─ ") + summary(sender))
+            visit(sender, prefix + ("   " if last else "│  "))
+
+    visit(root)
+    known = {root}
+    known.update(sender for senders in children.values() for sender in senders)
+    for sender in sorted(set(latest) - known):
+        rows.append(summary(sender))
+    return rows[:10]
+
+
+def _task_views(
+    pending: list[tuple[int, str]], completed: list[tuple[int, str]]
+) -> dict[str, list[tuple[int, str]]]:
+    running = [row for row in pending if "[進行]" in row[1] or "[執行]" in row[1]]
+    queued = [row for row in pending if row not in running]
+    return {"running": running, "pending": queued, "completed": completed}
+
+
 def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> int:
     size = shutil.get_terminal_size((115, 12))
     columns = max(80, size.columns)
@@ -224,7 +286,11 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     right_width = max(34, columns - left_width - gap)
     pending, completed, events, state = dashboard_snapshot(profile)
     _task_status, _source_name, latest_title, source_title = _source_labels(profile)
-    selected = pending if active_tab == "pending" else completed
+    views = _task_views(pending, completed)
+    selected = views[active_tab]
+    if profile.source == "jsonl":
+        events = pane_progress(profile)
+        latest_title = "Pane 進度"
     offset = min(max(0, offset), max(0, len(selected) - rows_available))
     visible = selected[offset : offset + rows_available]
     lines: list[str] = []
@@ -266,14 +332,20 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
             )
         lines.append(left_cell + DIM + " │ " + RESET + right_cell)
 
-    pending_tab = f" 待辦 {len(pending)} "
+    running_tab = f" 進行中 {len(views['running'])} "
+    pending_tab = f" 待辦 {len(views['pending'])} "
     completed_tab = f" 已完成 {len(completed)} "
     toggle_tab, toggle_color = _injection_badge(profile, blink_on)
-    controls = pending_tab + "  " + completed_tab + "  " + toggle_tab + "  點選｜← →｜i 注入｜滾輪"
+    controls = (
+        running_tab + "  " + pending_tab + "  " + completed_tab + "  " + toggle_tab
+        + "  點選｜← →｜i 注入｜滾輪"
+    )
     sync = f"更新 {datetime.now().astimezone():%H:%M} 同步 {_hhmm(state.get('last_checked_at'))}"
     title = source_title
     lines.append(
-        ("\033[1;30;46m" if active_tab == "pending" else "\033[2;37m")
+        ("\033[1;30;46m" if active_tab == "running" else "\033[2;37m")
+        + running_tab + RESET + "  "
+        + ("\033[1;30;46m" if active_tab == "pending" else "\033[2;37m")
         + pending_tab + RESET + "  "
         + ("\033[1;30;46m" if active_tab == "completed" else "\033[2;37m")
         + completed_tab + RESET + "  "
@@ -311,18 +383,21 @@ def _handle_input(
     data: str, active_tab: str, offset: int, bottom_row: int, profile: Profile | None = None
 ) -> tuple[str, int]:
     if "\x1b[D" in data:
-        active_tab, offset = "pending", 0
+        active_tab, offset = TASK_TABS[(TASK_TABS.index(active_tab) - 1) % len(TASK_TABS)], 0
     if "\x1b[C" in data or "\t" in data:
-        active_tab, offset = "completed", 0
+        active_tab, offset = TASK_TABS[(TASK_TABS.index(active_tab) + 1) % len(TASK_TABS)], 0
     if profile is not None and ("i" in data or "I" in data) and "\x1b" not in data:
         toggle_injection(profile)
     for button, x, y, action in MOUSE_RE.findall(data):
         button, x, y = int(button), int(x), int(y)
         if action == "M" and button == 0 and y == bottom_row:
-            pending_end = _width(" 待辦 99 ")
+            running_end = _width(" 進行中 99 ")
+            pending_end = running_end + 2 + _width(" 待辦 99 ")
             completed_end = pending_end + 2 + _width(" 已完成 99 ")
             toggle_end = completed_end + 2 + _width(TOGGLE_TEXT[False])
-            if x <= pending_end:
+            if x <= running_end:
+                active_tab, offset = "running", 0
+            elif running_end + 2 < x <= pending_end:
                 active_tab, offset = "pending", 0
             elif pending_end + 2 < x <= completed_end:
                 active_tab, offset = "completed", 0
@@ -336,7 +411,9 @@ def _handle_input(
 
 
 def dashboard(profile: Profile, watch_mode: bool, interval: float) -> None:
-    active_tab, offset, previous = "pending", 0, None
+    pending, completed, _events, _state = dashboard_snapshot(profile)
+    active_tab = "running" if _task_views(pending, completed)["running"] else "pending"
+    offset, previous = 0, None
     stdin_fd = sys.stdin.fileno()
     old_termios = termios.tcgetattr(stdin_fd) if sys.stdin.isatty() else None
     try:

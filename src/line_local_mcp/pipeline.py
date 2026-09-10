@@ -328,6 +328,11 @@ def _message_rows(messages: list[dict[str, Any]]) -> list[tuple[str, dict[str, A
     rows = []
     for message in messages:
         stable = {key: message.get(key) for key in ("time", "from", "chatId", "type", "text")}
+        # Local case sources may describe lane topology and current execution state.
+        # Keep optional metadata only when present so existing LINE fingerprints remain stable.
+        for key in ("parent", "state", "progress"):
+            if key in message:
+                stable[key] = message.get(key)
         raw = json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         occurrence = occurrences[raw]
         occurrences[raw] += 1

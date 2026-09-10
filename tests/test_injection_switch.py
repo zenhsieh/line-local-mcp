@@ -94,6 +94,14 @@ def test_dashboard_key_and_click_toggle(tmp_path):
     _handle_input("\x1b[C", "pending", 0, 11, profile)
     assert injection_active(profile) is False
     # a click on the badge (just right of the two tabs) toggles back on
-    x = _width(" 待辦 99 ") + 2 + _width(" 已完成 99 ") + 2 + 3
+    x = (
+        _width(" 進行中 99 ")
+        + 2
+        + _width(" 待辦 99 ")
+        + 2
+        + _width(" 已完成 99 ")
+        + 2
+        + 3
+    )
     _handle_input(f"\x1b[<0;{x};11M", "pending", 0, 11, profile)
     assert injection_active(profile) is True

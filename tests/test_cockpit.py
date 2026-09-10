@@ -6,7 +6,9 @@ from pathlib import Path
 from line_local_mcp.cockpit import (
     EVENT_MARKER_RE,
     _source_labels,
+    _task_views,
     dashboard_snapshot,
+    pane_progress,
     reconcile_todos,
 )
 from line_local_mcp.pipeline import load_profile, todo_add
@@ -105,3 +107,55 @@ source_file = "{source_file}"
     todo = profile.todo_file.read_text(encoding="utf-8")
     assert "[EVENT] 事件 2026-09-10 09:00 pane_x: Done" in todo
     assert "LINE" not in todo
+
+
+def test_task_views_separate_running_pending_and_completed():
+    views = _task_views(
+        [(1, "[進行] Active"), (2, "Queued"), (3, "[執行] Also active")],
+        [(4, "Done")],
+    )
+    assert [row[0] for row in views["running"]] == [1, 3]
+    assert [row[0] for row in views["pending"]] == [2]
+    assert [row[0] for row in views["completed"]] == [4]
+
+
+def test_pane_progress_keeps_latest_event_and_renders_hierarchy(tmp_path):
+    profile = _profile(tmp_path)
+    profile.state_dir.mkdir(parents=True)
+    events = [
+        {
+            "fingerprint": "d" * 64,
+            "messages": [
+                {"time": "2026-09-10 09:00", "from": "Synthetic Contact", "text": "Control"},
+                {
+                    "time": "2026-09-10 09:01",
+                    "from": "worker_x",
+                    "parent": "Synthetic Contact",
+                    "state": "running",
+                    "progress": "First step",
+                    "text": "Older detail",
+                },
+            ],
+            "attachments": [],
+        },
+        {
+            "fingerprint": "e" * 64,
+            "messages": [
+                {
+                    "time": "2026-09-10 09:02",
+                    "from": "worker_x",
+                    "parent": "Synthetic Contact",
+                    "state": "done",
+                    "progress": "Second step",
+                    "text": "Newer detail",
+                }
+            ],
+            "attachments": [],
+        },
+    ]
+    profile.inbox_file.write_text("\n".join(json.dumps(row) for row in events) + "\n", encoding="utf-8")
+
+    assert pane_progress(profile) == [
+        "Synthetic Contact · Control",
+        "└─ worker_x ✓ Second step",
+    ]
