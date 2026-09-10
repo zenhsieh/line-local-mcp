@@ -246,7 +246,7 @@ def pane_progress(profile: Profile) -> list[str]:
     def summary(sender: str) -> str:
         _timestamp, _index, message = latest[sender]
         state = str(message.get("state", "")).lower()
-        symbol = {"running": "●", "blocked": "!", "done": "✓", "waiting": "○"}.get(state, "·")
+        symbol = {"running": "●", "blocked": "✕", "done": "✓", "waiting": "○"}.get(state, "·")
         progress = " ".join(str(message.get("progress") or message.get("text", "")).split())
         return f"{symbol} {sender} {progress}".rstrip()
 
