@@ -119,6 +119,20 @@ def test_task_views_separate_running_pending_and_completed():
     assert [row[0] for row in views["completed"]] == [4]
 
 
+def test_dashboard_preserves_dependency_indentation(tmp_path):
+    profile = _profile(tmp_path)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 3 -->\n\n"
+        "- [ ] [01] Root task\n"
+        "  - [ ] [02] [執行] Dependent task\n",
+        encoding="utf-8",
+    )
+
+    pending, completed, _events, _state = dashboard_snapshot(profile)
+    assert completed == []
+    assert pending == [(1, "Root task"), (2, "  [執行] Dependent task")]
+
+
 def test_pane_progress_keeps_latest_event_and_renders_hierarchy(tmp_path):
     profile = _profile(tmp_path)
     profile.state_dir.mkdir(parents=True)

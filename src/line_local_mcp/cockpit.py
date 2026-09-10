@@ -43,7 +43,7 @@ from .pipeline import (
 EVENT_MARKER = "<!-- line-event:{fingerprint} -->"
 EVENT_MARKER_RE = re.compile(r"\s*<!-- line-event:[0-9a-f]{64} -->")
 TASK_RE = re.compile(
-    r"^(?P<prefix>- \[(?P<checked>[ xX])\]\s+)"
+    r"^(?P<indent>[ \t]*)(?P<prefix>- \[(?P<checked>[ xX])\]\s+)"
     r"(?:\[(?:#)?(?P<task_id>\d{2,})\]\s+)?(?P<body>.*)$"
 )
 MOUSE_RE = re.compile(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
@@ -56,7 +56,7 @@ STATUS_BADGES = {
     "[LINE]": ("LINE", "\033[1;38;5;159;48;5;24m"),
     "[EVENT]": ("事件", "\033[1;38;5;159;48;5;24m"),
     "[進行]": ("執行", "ACTIVE"),
-    "[執行]": ("執行", "\033[38;5;153;48;5;24m"),
+    "[執行]": ("執行", "ACTIVE"),
     "[設計]": ("設計", "\033[38;5;182;48;5;53m"),
     "[盤點]": ("盤點", "\033[38;5;186;48;5;58m"),
     "[待問]": ("待問", "\033[38;5;181;48;5;52m"),
@@ -183,7 +183,7 @@ def dashboard_snapshot(
         task = TASK_RE.match(line)
         if not task or not task.group("task_id"):
             continue
-        body = EVENT_MARKER_RE.sub("", task.group("body")).strip()
+        body = task.group("indent") + EVENT_MARKER_RE.sub("", task.group("body")).strip()
         row = (int(task.group("task_id")), body)
         (completed if task.group("checked").lower() == "x" else pending).append(row)
 

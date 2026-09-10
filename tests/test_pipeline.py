@@ -72,6 +72,21 @@ def test_todo_numbers_are_never_reused(tmp_path):
     assert "03 [待決] third" in rendered
 
 
+def test_indented_dependency_keeps_its_indent_and_can_complete(tmp_path):
+    _config, profile = write_config(tmp_path)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 2 -->\n\n"
+        "  - [ ] [01] [執行] dependent task\n",
+        encoding="utf-8",
+    )
+
+    assert "01   [執行] dependent task" in dashboard_text(profile)
+    assert todo_complete(profile, 1)
+    assert "  - [x] [01] [執行] dependent task" in profile.todo_file.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_injection_is_off_by_default_and_does_not_consume_inbox(tmp_path):
     _config, profile = write_config(tmp_path)
     profile.state_dir.mkdir(parents=True)

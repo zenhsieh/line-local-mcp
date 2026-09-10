@@ -29,7 +29,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 TASK_RE = re.compile(
-    r"^(?P<prefix>- \[(?P<checked>[ xX])\]\s+)"
+    r"^(?P<indent>[ \t]*)(?P<prefix>- \[(?P<checked>[ xX])\]\s+)"
     r"(?:\[(?:#)?(?P<task_id>\d{2,})\]\s+)?(?P<body>.*)$"
 )
 NEXT_ID_RE = re.compile(r"^<!--\s*next-task-id:\s*(\d+)\s*-->$")
@@ -543,7 +543,10 @@ def ensure_task_ids(profile: Profile) -> list[str]:
             continue
         while next_id in used:
             next_id += 1
-        lines[index] = f'{task.group("prefix")}[{next_id:02d}] {task.group("body")}'
+        lines[index] = (
+            f'{task.group("indent")}{task.group("prefix")}'
+            f'[{next_id:02d}] {task.group("body")}'
+        )
         used.add(next_id)
         next_id += 1
         changed = True
@@ -580,7 +583,12 @@ def todo_complete(profile: Profile, task_id: int) -> bool:
         for index, line in enumerate(lines):
             task = TASK_RE.match(line)
             if task and task.group("task_id") and int(task.group("task_id")) == task_id:
-                lines[index] = re.sub(r"^- \[[ xX]\]", "- [x]", line, count=1)
+                lines[index] = re.sub(
+                    r"^(?P<indent>[ \t]*)- \[[ xX]\]",
+                    r"\g<indent>- [x]",
+                    line,
+                    count=1,
+                )
                 changed = True
                 break
         if changed:
@@ -594,7 +602,10 @@ def dashboard_text(profile: Profile) -> str:
         task = TASK_RE.match(line)
         if not task:
             continue
-        row = f'{int(task.group("task_id")):02d} {task.group("body")}'
+        row = (
+            f'{int(task.group("task_id")):02d} '
+            f'{task.group("indent")}{task.group("body")}'
+        )
         (completed if task.group("checked").lower() == "x" else pending).append(row)
     events = []
     for _fingerprint, event in inbox_rows(profile)[-20:]:
