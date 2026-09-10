@@ -1,7 +1,7 @@
-"""Interactive Case Cockpit over the shared read-only LINE pipeline.
+"""Interactive Case Cockpit over the shared read-only event pipeline.
 
 The cockpit composes existing inbox, task, and injection contracts.  It does
-not send LINE messages, infer business truth, or own the adjacent agent.
+not mutate source events, infer business truth, or own the adjacent agent.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ BOLD = "\033[1m"
 STATUS_BADGES = {
     "[完成]": ("完成", "\033[38;5;250;48;5;238m"),
     "[LINE]": ("LINE", "\033[1;38;5;159;48;5;24m"),
+    "[EVENT]": ("事件", "\033[1;38;5;159;48;5;24m"),
     "[進行]": ("執行", "ACTIVE"),
     "[執行]": ("執行", "\033[38;5;153;48;5;24m"),
     "[設計]": ("設計", "\033[38;5;182;48;5;53m"),
@@ -76,7 +77,13 @@ def _one_line(value: object, limit: int = 240) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def _task_summary(event: dict[str, Any]) -> str:
+def _source_labels(profile: Profile) -> tuple[str, str, str, str]:
+    if profile.source == "jsonl":
+        return "EVENT", "事件", "最新事件", f"{profile.contact} 事件"
+    return "LINE", "LINE", "最新 LINE", f"{profile.contact} LINE"
+
+
+def _task_summary(event: dict[str, Any], source_name: str = "LINE") -> str:
     messages = event.get("messages", [])
     attachments = event.get("attachments", [])
     if messages:
@@ -85,15 +92,15 @@ def _task_summary(event: dict[str, Any]) -> str:
         sender = _one_line(first.get("from"), 48)
         body = _one_line(first.get("text"))
         suffix = f" (+{len(messages) - 1} messages)" if len(messages) > 1 else ""
-        return f"LINE {when} {sender}: {body}{suffix}".strip()
+        return f"{source_name} {when} {sender}: {body}{suffix}".strip()
     if attachments:
         first = attachments[0]
         when = _one_line(first.get("time"), 32)
         sender = _one_line(first.get("from"), 48)
         name = _one_line(first.get("filename") or first.get("kind") or "attachment")
         suffix = f" (+{len(attachments) - 1} attachments)" if len(attachments) > 1 else ""
-        return f"LINE {when} {sender}: [attachment] {name}{suffix}".strip()
-    return "LINE archive event"
+        return f"{source_name} {when} {sender}: [attachment] {name}{suffix}".strip()
+    return f"{source_name} archive event"
 
 
 def reconcile_todos(profile: Profile) -> dict[str, int]:
@@ -107,6 +114,7 @@ def reconcile_todos(profile: Profile) -> dict[str, int]:
     todo_text = profile.todo_file.read_text(encoding="utf-8")
     created = recovered = 0
 
+    task_status, source_name, _latest_title, _source_title = _source_labels(profile)
     for fingerprint, event in inbox_rows(profile):
         if fingerprint in assigned_set:
             continue
@@ -117,7 +125,7 @@ def reconcile_todos(profile: Profile) -> dict[str, int]:
             _write_private(state_file, {"assigned": assigned})
             recovered += 1
             continue
-        todo_add(profile, f"{_task_summary(event)} {marker}", status="LINE")
+        todo_add(profile, f"{_task_summary(event, source_name)} {marker}", status=task_status)
         todo_text = profile.todo_file.read_text(encoding="utf-8")
         assigned.append(fingerprint)
         assigned_set.add(fingerprint)
@@ -215,6 +223,7 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     left_width = max(40, min(columns - gap - 34, round(columns * 0.62)))
     right_width = max(34, columns - left_width - gap)
     pending, completed, events, state = dashboard_snapshot(profile)
+    _task_status, _source_name, latest_title, source_title = _source_labels(profile)
     selected = pending if active_tab == "pending" else completed
     offset = min(max(0, offset), max(0, len(selected) - rows_available))
     visible = selected[offset : offset + rows_available]
@@ -225,7 +234,7 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
         if left and active_tab == "completed":
             left = "[完成] " + re.sub(r"^\[[^\]]+\]\s*", "", left)
         if index == 0:
-            title = "最新 LINE"
+            title = latest_title
             first = events[0] if events else ""
             event_width = max(1, right_width - _width(title) - 1)
             event_cell = _fit(first, event_width).rstrip()
@@ -250,7 +259,11 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
         if "[附件]" in right_cell:
             right_cell = right_cell.replace("[附件]", "\033[33m[附件]" + RESET, 1)
         if index == 0:
-            right_cell = right_cell.replace("最新 LINE", BOLD + "\033[38;5;180m最新 LINE" + RESET, 1)
+            right_cell = right_cell.replace(
+                latest_title,
+                BOLD + "\033[38;5;180m" + latest_title + RESET,
+                1,
+            )
         lines.append(left_cell + DIM + " │ " + RESET + right_cell)
 
     pending_tab = f" 待辦 {len(pending)} "
@@ -258,7 +271,7 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     toggle_tab, toggle_color = _injection_badge(profile, blink_on)
     controls = pending_tab + "  " + completed_tab + "  " + toggle_tab + "  點選｜← →｜i 注入｜滾輪"
     sync = f"更新 {datetime.now().astimezone():%H:%M} 同步 {_hhmm(state.get('last_checked_at'))}"
-    title = f"{profile.contact} LINE"
+    title = source_title
     lines.append(
         ("\033[1;30;46m" if active_tab == "pending" else "\033[2;37m")
         + pending_tab + RESET + "  "

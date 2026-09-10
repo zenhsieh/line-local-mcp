@@ -517,7 +517,8 @@ def ensure_task_ids(profile: Profile) -> list[str]:
     try:
         original = profile.todo_file.read_text(encoding="utf-8")
     except FileNotFoundError:
-        original = f"# {profile.project_label} LINE tasks\n\n<!-- next-task-id: 1 -->\n\n"
+        source_name = "event" if profile.source == "jsonl" else "LINE"
+        original = f"# {profile.project_label} {source_name} tasks\n\n<!-- next-task-id: 1 -->\n\n"
     lines = original.splitlines()
     used: set[int] = set()
     marker_index = None
@@ -599,8 +600,9 @@ def dashboard_text(profile: Profile) -> str:
             events.append((str(item.get("time", "")), f"[attachment] {item.get('filename', '')}"))
     events.sort(reverse=True)
     checked = _load_json(profile.state_file, {}).get("last_checked_at", "never")
+    source_name = "events" if profile.source == "jsonl" else "LINE"
     lines = [
-        f"{profile.project_label} LINE | pending {len(pending)} | completed {len(completed)} | sync {checked}",
+        f"{profile.project_label} {source_name} | pending {len(pending)} | completed {len(completed)} | sync {checked}",
         "",
         "PENDING",
         *(pending or ["(none)"]),

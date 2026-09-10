@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from line_local_mcp.cockpit import EVENT_MARKER_RE, dashboard_snapshot, reconcile_todos
+from line_local_mcp.cockpit import (
+    EVENT_MARKER_RE,
+    _source_labels,
+    dashboard_snapshot,
+    reconcile_todos,
+)
 from line_local_mcp.pipeline import load_profile, todo_add
 
 
@@ -69,3 +74,34 @@ def test_deleted_event_task_is_not_recreated_and_id_is_not_reused(tmp_path):
 
     assert reconcile_todos(profile)["created"] == 0
     assert todo_add(profile, "Second") == 2
+
+
+def test_jsonl_source_uses_generic_event_labels(tmp_path):
+    config = tmp_path / "pipeline.toml"
+    source_file = tmp_path / "events.jsonl"
+    source_file.write_text("", encoding="utf-8")
+    config.write_text(
+        f'''[profiles.case]
+project_label = "Synthetic Case"
+contact = "case_x"
+state_dir = "{tmp_path / 'state'}"
+todo_file = "{tmp_path / 'todo.md'}"
+source = "jsonl"
+source_file = "{source_file}"
+''',
+        encoding="utf-8",
+    )
+    profile = load_profile(config, "case")
+    profile.state_dir.mkdir(parents=True)
+    event = {
+        "fingerprint": "c" * 64,
+        "messages": [{"time": "2026-09-10 09:00", "from": "pane_x", "text": "Done"}],
+        "attachments": [],
+    }
+    profile.inbox_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    assert _source_labels(profile) == ("EVENT", "事件", "最新事件", "case_x 事件")
+    assert reconcile_todos(profile)["created"] == 1
+    todo = profile.todo_file.read_text(encoding="utf-8")
+    assert "[EVENT] 事件 2026-09-10 09:00 pane_x: Done" in todo
+    assert "LINE" not in todo
