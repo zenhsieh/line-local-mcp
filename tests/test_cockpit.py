@@ -154,7 +154,7 @@ def test_render_pins_colored_review_status_to_first_line(tmp_path, monkeypatch, 
     rendered = capsys.readouterr().out
     first_line = rendered.removeprefix("\033[2J\033[H").splitlines()[0]
     assert first_line.startswith(USER_REVIEW_COLOR)
-    assert "需要你核准 · 1 項 · #02" in first_line
+    assert "核准狀態｜待核准 1 項 · #02" in first_line
     assert len(rendered.removeprefix("\033[2J\033[H").splitlines()) == 6
 
 
@@ -173,7 +173,7 @@ def test_render_always_reserves_green_clear_status_line(tmp_path, monkeypatch, c
 
     first_line = capsys.readouterr().out.removeprefix("\033[2J\033[H").splitlines()[0]
     assert "\033[1;38;5;255;48;5;28m" in first_line
-    assert "目前不需你核准 │ 尚無 durable 狀態" in first_line
+    assert "核准狀態｜無待核准事項 │ 尚無 durable 狀態" in first_line
 
 
 def test_latest_case_status_prefers_latest_progress(tmp_path):

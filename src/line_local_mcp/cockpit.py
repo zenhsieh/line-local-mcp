@@ -339,10 +339,10 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
 
     if review_status:
         review_count, task_ids = review_status
-        caption = f" 需要你核准 · {review_count} 項 · {task_ids} │ {latest_status} "
+        caption = f" 核准狀態｜待核准 {review_count} 項 · {task_ids} │ {latest_status} "
         color = USER_REVIEW_COLOR
     else:
-        caption = f" 目前不需你核准 │ {latest_status} "
+        caption = f" 核准狀態｜無待核准事項 │ {latest_status} "
         color = USER_CLEAR_COLOR
     lines.append(color + _fit(caption, columns) + RESET)
 
