@@ -5,8 +5,11 @@ from pathlib import Path
 
 from line_local_mcp.cockpit import (
     EVENT_MARKER_RE,
+    USER_REVIEW_COLOR,
+    _render,
     _source_labels,
     _task_views,
+    _user_review_status,
     dashboard_snapshot,
     pane_progress,
     reconcile_todos,
@@ -117,6 +120,41 @@ def test_task_views_separate_running_pending_and_completed():
     assert [row[0] for row in views["running"]] == [1, 3]
     assert [row[0] for row in views["pending"]] == [2]
     assert [row[0] for row in views["completed"]] == [4]
+
+
+def test_user_review_status_uses_only_explicit_pending_labels():
+    pending = [
+        (7, "[進行] Build artifact"),
+        (8, "Text says approval but has no durable review status"),
+        (9, "[待決] Approve exact publication"),
+        (10, "  [核准] Approve dependent action"),
+    ]
+
+    assert _user_review_status(pending) == (2, "#09, #10")
+    assert _user_review_status([(11, "[進行] No user action")]) is None
+
+
+def test_render_pins_colored_review_status_to_first_line(tmp_path, monkeypatch, capsys):
+    profile = _profile(tmp_path)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 4 -->\n\n"
+        "- [ ] [01] [進行] Active task\n"
+        "- [ ] [02] [待決] Approve exact action\n"
+        "- [ ] [03] Ordinary queued task\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "line_local_mcp.cockpit.shutil.get_terminal_size",
+        lambda _fallback: __import__("os").terminal_size((115, 6)),
+    )
+
+    _render(profile, "pending", 0, False)
+
+    rendered = capsys.readouterr().out
+    first_line = rendered.removeprefix("\033[2J\033[H").splitlines()[0]
+    assert first_line.startswith(USER_REVIEW_COLOR)
+    assert "需要你審核 · 1 項 · #02" in first_line
+    assert len(rendered.removeprefix("\033[2J\033[H").splitlines()) == 6
 
 
 def test_dashboard_preserves_dependency_indentation(tmp_path):

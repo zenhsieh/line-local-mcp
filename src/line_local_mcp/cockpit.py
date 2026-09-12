@@ -62,6 +62,8 @@ STATUS_BADGES = {
     "[待問]": ("待問", "\033[38;5;181;48;5;52m"),
     "[待決]": ("待決", "\033[38;5;181;48;5;52m"),
 }
+USER_REVIEW_LABELS = ("[待決]", "[待問]", "[審核]", "[核准]", "[批准]")
+USER_REVIEW_COLOR = "\033[1;38;5;16;48;5;220m"
 TASK_TABS = ("pending", "completed")
 
 
@@ -277,6 +279,18 @@ def _task_views(
     return {"running": running, "pending": queued, "completed": completed}
 
 
+def _user_review_status(pending: list[tuple[int, str]]) -> tuple[int, str] | None:
+    """Summarize explicit durable user-review tasks without inferring from prose."""
+
+    review = [row for row in pending if any(label in row[1] for label in USER_REVIEW_LABELS)]
+    if not review:
+        return None
+    task_ids = ", ".join(f"#{task_id:02d}" for task_id, _body in review[:6])
+    if len(review) > 6:
+        task_ids += f", +{len(review) - 6}"
+    return len(review), task_ids
+
+
 def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> int:
     size = shutil.get_terminal_size((115, 12))
     columns = max(80, size.columns)
@@ -288,14 +302,21 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     _task_status, _source_name, latest_title, source_title = _source_labels(profile)
     views = _task_views(pending, completed)
     selected = views["running"] + views["pending"] if active_tab == "pending" else completed
+    review_status = _user_review_status(pending)
     if profile.source == "jsonl":
         events = pane_progress(profile)
         latest_title = "Pane 進度"
-    offset = min(max(0, offset), max(0, len(selected) - rows_available))
-    visible = selected[offset : offset + rows_available]
+    content_rows = max(0, rows_available - (1 if review_status else 0))
+    offset = min(max(0, offset), max(0, len(selected) - content_rows))
+    visible = selected[offset : offset + content_rows]
     lines: list[str] = []
 
-    for index in range(rows_available):
+    if review_status:
+        review_count, task_ids = review_status
+        caption = f" 需要你審核 · {review_count} 項 · {task_ids} "
+        lines.append(USER_REVIEW_COLOR + _fit(caption, columns) + RESET)
+
+    for index in range(content_rows):
         left = f"{visible[index][0]:02d}. {visible[index][1]}" if index < len(visible) else ""
         if left and active_tab == "completed":
             left = "[完成] " + re.sub(r"^\[[^\]]+\]\s*", "", left)
