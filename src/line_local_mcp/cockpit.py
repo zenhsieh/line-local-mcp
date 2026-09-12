@@ -64,6 +64,7 @@ STATUS_BADGES = {
 }
 USER_REVIEW_LABELS = ("[待決]", "[待問]", "[審核]", "[核准]", "[批准]")
 USER_REVIEW_COLOR = "\033[1;38;5;16;48;5;220m"
+USER_CLEAR_COLOR = "\033[1;38;5;255;48;5;28m"
 TASK_TABS = ("pending", "completed")
 
 
@@ -271,6 +272,30 @@ def pane_progress(profile: Profile) -> list[str]:
     return rows[:10]
 
 
+def latest_case_status(profile: Profile) -> str:
+    """Return the latest durable event status, preferring its compact progress."""
+
+    latest: tuple[str, int, dict[str, Any]] | None = None
+    event_index = 0
+    for _fingerprint, event in inbox_rows(profile):
+        for message in event.get("messages", []):
+            if message.get("type", "text") != "text":
+                continue
+            event_index += 1
+            candidate = (str(message.get("time", "")), event_index, message)
+            if latest is None or candidate[:2] > latest[:2]:
+                latest = candidate
+    if latest is None:
+        return "尚無 durable 狀態"
+
+    message = latest[2]
+    state = str(message.get("state", "")).lower()
+    symbol = {"running": "●", "blocked": "✕", "done": "✓", "waiting": "○"}.get(state, "·")
+    sender = _one_line(message.get("from"), 32)
+    progress = _one_line(message.get("progress") or message.get("text"), 180)
+    return f"{symbol} {sender} {progress}".strip()
+
+
 def _task_views(
     pending: list[tuple[int, str]], completed: list[tuple[int, str]]
 ) -> dict[str, list[tuple[int, str]]]:
@@ -303,18 +328,23 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     views = _task_views(pending, completed)
     selected = views["running"] + views["pending"] if active_tab == "pending" else completed
     review_status = _user_review_status(pending)
+    latest_status = latest_case_status(profile)
     if profile.source == "jsonl":
         events = pane_progress(profile)
         latest_title = "Pane 進度"
-    content_rows = max(0, rows_available - (1 if review_status else 0))
+    content_rows = max(0, rows_available - 1)
     offset = min(max(0, offset), max(0, len(selected) - content_rows))
     visible = selected[offset : offset + content_rows]
     lines: list[str] = []
 
     if review_status:
         review_count, task_ids = review_status
-        caption = f" 需要你審核 · {review_count} 項 · {task_ids} "
-        lines.append(USER_REVIEW_COLOR + _fit(caption, columns) + RESET)
+        caption = f" 需要你核准 · {review_count} 項 · {task_ids} │ {latest_status} "
+        color = USER_REVIEW_COLOR
+    else:
+        caption = f" 目前不需你核准 │ {latest_status} "
+        color = USER_CLEAR_COLOR
+    lines.append(color + _fit(caption, columns) + RESET)
 
     for index in range(content_rows):
         left = f"{visible[index][0]:02d}. {visible[index][1]}" if index < len(visible) else ""

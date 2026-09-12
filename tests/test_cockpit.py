@@ -11,6 +11,7 @@ from line_local_mcp.cockpit import (
     _task_views,
     _user_review_status,
     dashboard_snapshot,
+    latest_case_status,
     pane_progress,
     reconcile_todos,
 )
@@ -153,8 +154,56 @@ def test_render_pins_colored_review_status_to_first_line(tmp_path, monkeypatch, 
     rendered = capsys.readouterr().out
     first_line = rendered.removeprefix("\033[2J\033[H").splitlines()[0]
     assert first_line.startswith(USER_REVIEW_COLOR)
-    assert "需要你審核 · 1 項 · #02" in first_line
+    assert "需要你核准 · 1 項 · #02" in first_line
     assert len(rendered.removeprefix("\033[2J\033[H").splitlines()) == 6
+
+
+def test_render_always_reserves_green_clear_status_line(tmp_path, monkeypatch, capsys):
+    profile = _profile(tmp_path)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 2 -->\n\n- [ ] [01] [進行] Active task\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "line_local_mcp.cockpit.shutil.get_terminal_size",
+        lambda _fallback: __import__("os").terminal_size((115, 6)),
+    )
+
+    _render(profile, "pending", 0, False)
+
+    first_line = capsys.readouterr().out.removeprefix("\033[2J\033[H").splitlines()[0]
+    assert "\033[1;38;5;255;48;5;28m" in first_line
+    assert "目前不需你核准 │ 尚無 durable 狀態" in first_line
+
+
+def test_latest_case_status_prefers_latest_progress(tmp_path):
+    profile = _profile(tmp_path)
+    profile.state_dir.mkdir(parents=True)
+    events = [
+        {
+            "fingerprint": "a" * 64,
+            "messages": [
+                {
+                    "time": "2026-09-12T08:00:00+08:00",
+                    "from": "worker_x",
+                    "state": "done",
+                    "progress": "older closure",
+                    "text": "long older detail",
+                },
+                {
+                    "time": "2026-09-12T08:01:00+08:00",
+                    "from": "pilot_x",
+                    "state": "running",
+                    "progress": "verification routed",
+                    "text": "longer detail should not win",
+                },
+            ],
+            "attachments": [],
+        }
+    ]
+    profile.inbox_file.write_text(json.dumps(events[0]) + "\n", encoding="utf-8")
+
+    assert latest_case_status(profile) == "● pilot_x verification routed"
 
 
 def test_dashboard_preserves_dependency_indentation(tmp_path):
