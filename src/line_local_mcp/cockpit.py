@@ -65,7 +65,7 @@ STATUS_BADGES = {
 USER_REVIEW_LABELS = ("[待決]", "[待問]", "[審核]", "[核准]", "[批准]")
 USER_REVIEW_COLOR = "\033[1;38;5;16;48;5;220m"
 USER_CLEAR_COLOR = "\033[1;38;5;255;48;5;28m"
-TASK_TABS = ("pending", "completed")
+TASK_TABS = ("pending", "review", "completed")
 
 
 @contextmanager
@@ -299,9 +299,13 @@ def latest_case_status(profile: Profile) -> str:
 def _task_views(
     pending: list[tuple[int, str]], completed: list[tuple[int, str]]
 ) -> dict[str, list[tuple[int, str]]]:
-    running = [row for row in pending if "[進行]" in row[1] or "[執行]" in row[1]]
-    queued = [row for row in pending if row not in running]
-    return {"running": running, "pending": queued, "completed": completed}
+    review = [row for row in pending if any(label in row[1] for label in USER_REVIEW_LABELS)]
+    running = [
+        row for row in pending
+        if row not in review and ("[進行]" in row[1] or "[執行]" in row[1])
+    ]
+    queued = [row for row in pending if row not in running and row not in review]
+    return {"running": running, "pending": queued, "review": review, "completed": completed}
 
 
 def _user_review_status(pending: list[tuple[int, str]]) -> tuple[int, str] | None:
@@ -326,7 +330,12 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     pending, completed, events, state = dashboard_snapshot(profile)
     _task_status, _source_name, latest_title, source_title = _source_labels(profile)
     views = _task_views(pending, completed)
-    selected = views["running"] + views["pending"] if active_tab == "pending" else completed
+    if active_tab == "pending":
+        selected = views["running"] + views["pending"]
+    elif active_tab == "review":
+        selected = views["review"]
+    else:
+        selected = completed
     review_status = _user_review_status(pending)
     latest_status = latest_case_status(profile)
     if profile.source == "jsonl":
@@ -383,11 +392,13 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
             )
         lines.append(left_cell + DIM + " │ " + RESET + right_cell)
 
-    pending_tab = f" 進行／待辦 {len(views['running'])}/{len(pending)} "
+    pending_count = len(views["running"]) + len(views["pending"])
+    pending_tab = f" 進行／待辦 {len(views['running'])}/{pending_count} "
+    review_tab = f" 待核准 {len(views['review'])} "
     completed_tab = f" 已完成 {len(completed)} "
     toggle_tab, toggle_color = _injection_badge(profile, blink_on)
     controls = (
-        pending_tab + "  " + completed_tab + "  " + toggle_tab
+        pending_tab + "  " + review_tab + "  " + completed_tab + "  " + toggle_tab
         + "  點選｜← →｜i 注入｜滾輪"
     )
     sync = f"更新 {datetime.now().astimezone():%H:%M} 同步 {_hhmm(state.get('last_checked_at'))}"
@@ -395,6 +406,8 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     lines.append(
         ("\033[1;30;46m" if active_tab == "pending" else "\033[2;37m")
         + pending_tab + RESET + "  "
+        + ("\033[1;30;43m" if active_tab == "review" else "\033[2;37m")
+        + review_tab + RESET + "  "
         + ("\033[1;30;46m" if active_tab == "completed" else "\033[2;37m")
         + completed_tab + RESET + "  "
         + toggle_color + toggle_tab + RESET + DIM + "  點選｜← →｜i 注入｜滾輪" + RESET
@@ -438,13 +451,18 @@ def _handle_input(
         toggle_injection(profile)
     for button, x, y, action in MOUSE_RE.findall(data):
         button, x, y = int(button), int(x), int(y)
-        if action == "M" and button == 0 and y == bottom_row:
+        if action == "M" and button == 0 and y == 1:
+            active_tab, offset = "review", 0
+        elif action == "M" and button == 0 and y == bottom_row:
             pending_end = _width(" 進行／待辦 99/99 ")
-            completed_end = pending_end + 2 + _width(" 已完成 99 ")
+            review_end = pending_end + 2 + _width(" 待核准 99 ")
+            completed_end = review_end + 2 + _width(" 已完成 99 ")
             toggle_end = completed_end + 2 + _width(TOGGLE_TEXT[False])
             if x <= pending_end:
                 active_tab, offset = "pending", 0
-            elif pending_end + 2 < x <= completed_end:
+            elif pending_end + 2 < x <= review_end:
+                active_tab, offset = "review", 0
+            elif review_end + 2 < x <= completed_end:
                 active_tab, offset = "completed", 0
             elif completed_end + 2 < x <= toggle_end and profile is not None:
                 toggle_injection(profile)

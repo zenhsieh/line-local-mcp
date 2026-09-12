@@ -115,11 +115,17 @@ source_file = "{source_file}"
 
 def test_task_views_separate_running_pending_and_completed():
     views = _task_views(
-        [(1, "[進行] Active"), (2, "Queued"), (3, "[執行] Also active")],
+        [
+            (1, "[進行] Active"),
+            (2, "Queued"),
+            (3, "[執行] Also active"),
+            (5, "[待決] Owner decision"),
+        ],
         [(4, "Done")],
     )
     assert [row[0] for row in views["running"]] == [1, 3]
     assert [row[0] for row in views["pending"]] == [2]
+    assert [row[0] for row in views["review"]] == [5]
     assert [row[0] for row in views["completed"]] == [4]
 
 
@@ -156,6 +162,29 @@ def test_render_pins_colored_review_status_to_first_line(tmp_path, monkeypatch, 
     assert first_line.startswith(USER_REVIEW_COLOR)
     assert "核准狀態｜待核准 1 項 · #02" in first_line
     assert len(rendered.removeprefix("\033[2J\033[H").splitlines()) == 6
+
+
+def test_render_review_tab_shows_only_user_decisions(tmp_path, monkeypatch, capsys):
+    profile = _profile(tmp_path)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 4 -->\n\n"
+        "- [ ] [01] [進行] Active task\n"
+        "- [ ] [02] [待決] Approve exact action\n"
+        "- [ ] [03] Ordinary queued task\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "line_local_mcp.cockpit.shutil.get_terminal_size",
+        lambda _fallback: __import__("os").terminal_size((115, 6)),
+    )
+
+    _render(profile, "review", 0, False)
+
+    rendered = capsys.readouterr().out
+    assert "Approve exact action" in rendered
+    assert "Active task" not in rendered
+    assert "Ordinary queued task" not in rendered
+    assert "待核准 1" in rendered
 
 
 def test_render_always_reserves_green_clear_status_line(tmp_path, monkeypatch, capsys):

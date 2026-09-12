@@ -93,9 +93,11 @@ def test_dashboard_key_and_click_toggle(tmp_path):
     # arrow keys carry an ESC prefix and must not toggle
     _handle_input("\x1b[C", "pending", 0, 11, profile)
     assert injection_active(profile) is False
-    # a click on the badge (just right of the two tabs) toggles back on
+    # a click on the badge (just right of the three tabs) toggles back on
     x = (
         _width(" 進行／待辦 99/99 ")
+        + 2
+        + _width(" 待核准 99 ")
         + 2
         + _width(" 已完成 99 ")
         + 2
@@ -103,3 +105,11 @@ def test_dashboard_key_and_click_toggle(tmp_path):
     )
     _handle_input(f"\x1b[<0;{x};11M", "pending", 0, 11, profile)
     assert injection_active(profile) is True
+
+
+def test_clicking_status_row_and_review_tab_select_review(tmp_path):
+    profile = make(tmp_path, injection=False)
+    assert _handle_input("\x1b[<0;4;1M", "pending", 3, 11, profile) == ("review", 0)
+
+    x = _width(" 進行／待辦 99/99 ") + 2 + 3
+    assert _handle_input(f"\x1b[<0;{x};11M", "completed", 2, 11, profile) == ("review", 0)
