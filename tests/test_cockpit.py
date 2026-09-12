@@ -187,6 +187,27 @@ def test_render_review_tab_shows_only_user_decisions(tmp_path, monkeypatch, caps
     assert "待核准 1" in rendered
 
 
+def test_render_review_tab_wraps_long_decision_without_truncating(tmp_path, monkeypatch, capsys):
+    profile = _profile(tmp_path)
+    detail = "Approve exact publication bound to commit " + "a" * 64 + " and preserve archive branches"
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 2 -->\n\n"
+        f"- [ ] [01] [待決] {detail}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "line_local_mcp.cockpit.shutil.get_terminal_size",
+        lambda _fallback: __import__("os").terminal_size((90, 8)),
+    )
+
+    _render(profile, "review", 0, False)
+
+    rendered = capsys.readouterr().out
+    assert "…" not in "\n".join(line.split(" │ ", 1)[0] for line in rendered.splitlines()[1:-1])
+    assert "preserve archive branches" in rendered
+    assert len(rendered.splitlines()) == 8
+
+
 def test_render_always_reserves_green_clear_status_line(tmp_path, monkeypatch, capsys):
     profile = _profile(tmp_path)
     profile.todo_file.write_text(

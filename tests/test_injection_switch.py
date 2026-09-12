@@ -95,11 +95,11 @@ def test_dashboard_key_and_click_toggle(tmp_path):
     assert injection_active(profile) is False
     # a click on the badge (just right of the three tabs) toggles back on
     x = (
-        _width(" 進行／待辦 99/99 ")
+        _width(" 待辦 99 ")
         + 2
         + _width(" 待核准 99 ")
         + 2
-        + _width(" 已完成 99 ")
+        + _width(" 完成 99 ")
         + 2
         + 3
     )
@@ -111,5 +111,5 @@ def test_clicking_status_row_and_review_tab_select_review(tmp_path):
     profile = make(tmp_path, injection=False)
     assert _handle_input("\x1b[<0;4;1M", "pending", 3, 11, profile) == ("review", 0)
 
-    x = _width(" 進行／待辦 99/99 ") + 2 + 3
+    x = _width(" 待辦 99 ") + 2 + 3
     assert _handle_input(f"\x1b[<0;{x};11M", "completed", 2, 11, profile) == ("review", 0)

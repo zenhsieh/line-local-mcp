@@ -171,6 +171,27 @@ def _fit(value: object, width: int) -> str:
     return "".join(result) + " " * max(0, width - used)
 
 
+def _wrap(value: object, width: int, continuation: str = "    ") -> list[str]:
+    """Wrap plain display text without losing wide characters or long identifiers."""
+
+    text = str(value).replace("\n", " ")
+    if not text:
+        return [""]
+    lines: list[str] = []
+    current: list[str] = []
+    used = 0
+    for char in text:
+        char_width = 2 if unicodedata.east_asian_width(char) in "WF" else 1
+        if current and used + char_width > width:
+            lines.append("".join(current).rstrip())
+            current = list(continuation)
+            used = _width(continuation)
+        current.append(char)
+        used += char_width
+    lines.append("".join(current).rstrip())
+    return lines
+
+
 def _badge_text(caption: str) -> str:
     inside = 6 - _width(caption)
     left = inside // 2
@@ -342,8 +363,17 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
         events = pane_progress(profile)
         latest_title = "Pane 進度"
     content_rows = max(0, rows_available - 1)
-    offset = min(max(0, offset), max(0, len(selected) - content_rows))
-    visible = selected[offset : offset + content_rows]
+    display_rows: list[str] = []
+    for task_id, body in selected:
+        left = f"{task_id:02d}. {body}"
+        if active_tab == "completed":
+            left = "[完成] " + re.sub(r"^\[[^\]]+\]\s*", "", left)
+        if active_tab == "review":
+            display_rows.extend(_wrap(left, left_width))
+        else:
+            display_rows.append(left)
+    offset = min(max(0, offset), max(0, len(display_rows) - content_rows))
+    visible = display_rows[offset : offset + content_rows]
     lines: list[str] = []
 
     if review_status:
@@ -356,9 +386,7 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     lines.append(color + _fit(caption, columns) + RESET)
 
     for index in range(content_rows):
-        left = f"{visible[index][0]:02d}. {visible[index][1]}" if index < len(visible) else ""
-        if left and active_tab == "completed":
-            left = "[完成] " + re.sub(r"^\[[^\]]+\]\s*", "", left)
+        left = visible[index] if index < len(visible) else ""
         if index == 0:
             title = latest_title
             first = events[0] if events else ""
@@ -393,9 +421,9 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
         lines.append(left_cell + DIM + " │ " + RESET + right_cell)
 
     pending_count = len(views["running"]) + len(views["pending"])
-    pending_tab = f" 進行／待辦 {len(views['running'])}/{pending_count} "
+    pending_tab = f" 待辦 {pending_count} "
     review_tab = f" 待核准 {len(views['review'])} "
-    completed_tab = f" 已完成 {len(completed)} "
+    completed_tab = f" 完成 {len(completed)} "
     toggle_tab, toggle_color = _injection_badge(profile, blink_on)
     controls = (
         pending_tab + "  " + review_tab + "  " + completed_tab + "  " + toggle_tab
@@ -454,9 +482,9 @@ def _handle_input(
         if action == "M" and button == 0 and y == 1:
             active_tab, offset = "review", 0
         elif action == "M" and button == 0 and y == bottom_row:
-            pending_end = _width(" 進行／待辦 99/99 ")
+            pending_end = _width(" 待辦 99 ")
             review_end = pending_end + 2 + _width(" 待核准 99 ")
-            completed_end = review_end + 2 + _width(" 已完成 99 ")
+            completed_end = review_end + 2 + _width(" 完成 99 ")
             toggle_end = completed_end + 2 + _width(TOGGLE_TEXT[False])
             if x <= pending_end:
                 active_tab, offset = "pending", 0
