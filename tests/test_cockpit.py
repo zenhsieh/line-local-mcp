@@ -187,6 +187,27 @@ def test_render_review_tab_shows_only_user_decisions(tmp_path, monkeypatch, caps
     assert "待核准 1" in rendered
 
 
+def test_render_review_tab_puts_badge_and_decision_on_separate_rows(tmp_path, monkeypatch, capsys):
+    profile = _profile(tmp_path)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 2 -->\n\n"
+        "- [ ] [01] [待決] Approve the fixed-environment wrapper\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "line_local_mcp.cockpit.shutil.get_terminal_size",
+        lambda _fallback: __import__("os").terminal_size((115, 7)),
+    )
+
+    _render(profile, "review", 0, False)
+
+    left_rows = [line.split(" │ ", 1)[0] for line in capsys.readouterr().out.splitlines()[1:-1]]
+    assert "01." in left_rows[0]
+    assert "待決" in left_rows[0]
+    assert "Approve the fixed-environment wrapper" not in left_rows[0]
+    assert "Approve the fixed-environment wrapper" in left_rows[1]
+
+
 def test_render_review_tab_wraps_long_decision_without_truncating(tmp_path, monkeypatch, capsys):
     profile = _profile(tmp_path)
     detail = "Approve exact publication bound to commit " + "a" * 64 + " and preserve archive branches"

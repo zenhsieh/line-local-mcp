@@ -341,6 +341,20 @@ def _user_review_status(pending: list[tuple[int, str]]) -> tuple[int, str] | Non
     return len(review), task_ids
 
 
+def _review_display_rows(task_id: int, body: str, width: int) -> list[str]:
+    """Put a review badge on its own row so the decision text stays visible."""
+
+    stripped = body.strip()
+    label = next((item for item in USER_REVIEW_LABELS if stripped.startswith(item)), None)
+    if label is None:
+        return _wrap(f"{task_id:02d}. {body}", width)
+    detail = stripped[len(label) :].strip()
+    rows = [f"{task_id:02d}. {label}"]
+    if detail:
+        rows.extend(_wrap("    " + detail, width))
+    return rows
+
+
 def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> int:
     size = shutil.get_terminal_size((115, 12))
     columns = max(80, size.columns)
@@ -369,7 +383,7 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
         if active_tab == "completed":
             left = "[完成] " + re.sub(r"^\[[^\]]+\]\s*", "", left)
         if active_tab == "review":
-            display_rows.extend(_wrap(left, left_width))
+            display_rows.extend(_review_display_rows(task_id, body, left_width))
         else:
             display_rows.append(left)
     offset = min(max(0, offset), max(0, len(display_rows) - content_rows))
