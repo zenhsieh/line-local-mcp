@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,38 @@ def test_todo_numbers_are_never_reused(tmp_path):
     rendered = dashboard_text(profile)
     assert "01 [待決] first" in rendered
     assert "03 [待決] third" in rendered
+
+
+def test_todo_writes_are_atomic_locked_and_backed_up(tmp_path):
+    _config, profile = write_config(tmp_path)
+    assert todo_add(profile, "first") == 1
+    first_bytes = profile.todo_file.read_bytes()
+
+    assert todo_add(profile, "second") == 2
+
+    assert profile.todo_file.with_name("tasks.md.bak.1").read_bytes() == first_bytes
+    assert "first" in profile.todo_file.read_text(encoding="utf-8")
+    assert "second" in profile.todo_file.read_text(encoding="utf-8")
+
+
+def test_concurrent_dashboard_reads_do_not_lose_todo_updates(tmp_path):
+    _config, profile = write_config(tmp_path)
+
+    def add(index: int) -> None:
+        todo_add(profile, f"task-{index}")
+
+    def read(_index: int) -> None:
+        dashboard_text(profile)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(add, index) for index in range(40)]
+        futures.extend(executor.submit(read, index) for index in range(120))
+        for future in futures:
+            future.result()
+
+    text = profile.todo_file.read_text(encoding="utf-8")
+    assert sum(f"task-{index}" in text for index in range(40)) == 40
+    assert "<!-- next-task-id: 41 -->" in text
 
 
 def test_indented_dependency_keeps_its_indent_and_can_complete(tmp_path):

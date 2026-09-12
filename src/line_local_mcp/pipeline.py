@@ -13,8 +13,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from collections import Counter
@@ -193,6 +195,55 @@ def _lock(profile: Profile) -> Iterator[None]:
     with profile.lock_file.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         yield
+
+
+def _atomic_write_text(path: Path, text: str, mode: int = 0o664) -> None:
+    """Replace a text file atomically using a unique sibling temporary file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(mode)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _backup_todo(path: Path, keep: int = 3) -> None:
+    """Rotate byte-exact todo backups while the profile lock is held."""
+
+    if not path.exists():
+        return
+    for index in range(keep, 1, -1):
+        previous = path.with_name(f"{path.name}.bak.{index - 1}")
+        current = path.with_name(f"{path.name}.bak.{index}")
+        if previous.exists():
+            previous.replace(current)
+    backup = path.with_name(f"{path.name}.bak.1")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{backup.name}.", suffix=".tmp", dir=path.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        shutil.copy2(path, temporary)
+        temporary.replace(backup)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _write_todo(profile: Profile, lines: list[str]) -> None:
+    _backup_todo(profile.todo_file)
+    _atomic_write_text(profile.todo_file, "\n".join(lines) + "\n")
 
 
 def _server_parameters(profile: Profile) -> StdioServerParameters:
@@ -518,7 +569,7 @@ def inject_pending(profile: Profile) -> dict[str, int]:
     return {"sent": sent, "failed": failed, "disabled": 0, "paused": 0}
 
 
-def ensure_task_ids(profile: Profile) -> list[str]:
+def _ensure_task_ids_locked(profile: Profile) -> list[str]:
     try:
         original = profile.todo_file.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -558,27 +609,29 @@ def ensure_task_ids(profile: Profile) -> list[str]:
         lines[marker_index] = marker_text
         changed = True
     if changed or not profile.todo_file.exists():
-        profile.todo_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = profile.todo_file.with_suffix(profile.todo_file.suffix + ".tmp")
-        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        temporary.replace(profile.todo_file)
+        _write_todo(profile, lines)
     return lines
+
+
+def ensure_task_ids(profile: Profile) -> list[str]:
+    with _lock(profile):
+        return _ensure_task_ids_locked(profile)
 
 
 def todo_add(profile: Profile, text: str, status: str = "待決") -> int:
     with _lock(profile):
-        lines = ensure_task_ids(profile)
+        lines = _ensure_task_ids_locked(profile)
         marker_index = next(index for index, line in enumerate(lines) if NEXT_ID_RE.match(line))
         task_id = int(NEXT_ID_RE.match(lines[marker_index]).group(1))  # type: ignore[union-attr]
         lines[marker_index] = f"<!-- next-task-id: {task_id + 1} -->"
         lines.append(f"- [ ] [{task_id:02d}] [{status}] {text}")
-        profile.todo_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _write_todo(profile, lines)
     return task_id
 
 
 def todo_complete(profile: Profile, task_id: int) -> bool:
     with _lock(profile):
-        lines = ensure_task_ids(profile)
+        lines = _ensure_task_ids_locked(profile)
         changed = False
         for index, line in enumerate(lines):
             task = TASK_RE.match(line)
@@ -592,7 +645,7 @@ def todo_complete(profile: Profile, task_id: int) -> bool:
                 changed = True
                 break
         if changed:
-            profile.todo_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            _write_todo(profile, lines)
         return changed
 
 
