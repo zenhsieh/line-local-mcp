@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .pipeline import (
+    SELF_LABEL,
     Profile,
     _load_json,
     _write_private,
@@ -35,6 +36,7 @@ from .pipeline import (
     injection_active,
     injection_switch,
     load_profile,
+    outbox_rows,
     set_injection_switch,
     todo_add,
     watch,
@@ -42,6 +44,11 @@ from .pipeline import (
 
 EVENT_MARKER = "<!-- line-event:{fingerprint} -->"
 EVENT_MARKER_RE = re.compile(r"\s*<!-- line-event:[0-9a-f]{64} -->")
+REPLIED_MARKER = "<!-- replied-at:{timestamp} archived:{status} -->"
+REPLIED_MARKER_RE = re.compile(
+    r"\s*<!-- replied-at:(?P<timestamp>.+?) archived:(?P<status>unknown|yes|no) -->"
+)
+ARCHIVE_STATUS_LABELS = {"unknown": "歸檔未知", "yes": "已歸檔", "no": "未歸檔"}
 TASK_RE = re.compile(
     r"^(?P<prefix>- \[(?P<checked>[ xX])\]\s+)"
     r"(?:\[(?:#)?(?P<task_id>\d{2,})\]\s+)?(?P<body>.*)$"
@@ -127,6 +134,77 @@ def reconcile_todos(profile: Profile) -> dict[str, int]:
     return {"created": created, "recovered": recovered, "known": len(assigned)}
 
 
+def _event_latest_time(event: dict[str, Any]) -> str:
+    times = [str(m.get("time", "")) for m in event.get("messages", [])]
+    times += [str(a.get("time", "")) for a in event.get("attachments", [])]
+    return max((t for t in times if t), default="")
+
+
+def _task_archive_status(profile: Profile, event: dict[str, Any]) -> str:
+    """Whether the reply's substance made it into the case system.
+
+    No integration with an external case repo exists here, and a wrong "yes" is far
+    worse than an honest "unknown" -- a guessed heuristic could launder a real
+    hand-off miss into a label that reads as resolved. Always "unknown" until this
+    profile is given a concrete, verifiable archive check to call.
+    """
+    del profile, event
+    return "unknown"
+
+
+def mark_replied_tasks(profile: Profile) -> dict[str, int]:
+    """Flag pending tasks that already got an outgoing reply, without closing them.
+
+    Replying is not resolving: see PIPELINE.md on why an auto-close here would be
+    wrong (an acknowledgement can leave the underlying ask unresolved). The badge
+    carries two independent dimensions -- replied-at and archive status -- because
+    conflating them is exactly what let a real hand-off go unnoticed while every
+    task looked reassuringly "handled".
+    """
+    lines = ensure_task_ids(profile)
+    events = dict(inbox_rows(profile))
+    outgoing_times = sorted(
+        {
+            str(message.get("time", ""))
+            for _fingerprint, event in outbox_rows(profile)
+            for message in event.get("messages", [])
+            if str(message.get("time", "")).strip()
+        }
+    )
+    marked = 0
+    changed = False
+    output: list[str] = []
+    for line in lines:
+        task = TASK_RE.match(line)
+        if not task or not task.group("task_id") or task.group("checked").lower() == "x":
+            output.append(line)
+            continue
+        body = task.group("body")
+        if REPLIED_MARKER_RE.search(body):
+            output.append(line)
+            continue
+        fingerprint_match = re.search(r"<!-- line-event:([0-9a-f]{64}) -->", body)
+        event = events.get(fingerprint_match.group(1)) if fingerprint_match else None
+        task_time = _event_latest_time(event) if event else ""
+        reply_time = next((t for t in outgoing_times if t > task_time), None) if task_time else None
+        if not reply_time:
+            output.append(line)
+            continue
+        archive_status = _task_archive_status(profile, event)
+        badge = f"[已回覆 {_hhmm(reply_time)}・{ARCHIVE_STATUS_LABELS[archive_status]}] "
+        new_body = (
+            badge + body + " " + REPLIED_MARKER.format(timestamp=reply_time, status=archive_status)
+        )
+        output.append(task.group("prefix") + f"[{int(task.group('task_id')):02d}] " + new_body)
+        marked += 1
+        changed = True
+    if changed:
+        temporary = profile.todo_file.with_suffix(profile.todo_file.suffix + ".tmp")
+        temporary.write_text("\n".join(output) + "\n", encoding="utf-8")
+        temporary.replace(profile.todo_file)
+    return {"marked": marked}
+
+
 def _hhmm(value: object) -> str:
     if not value:
         return "--:--"
@@ -174,7 +252,8 @@ def dashboard_snapshot(
         task = TASK_RE.match(line)
         if not task or not task.group("task_id"):
             continue
-        body = EVENT_MARKER_RE.sub("", task.group("body")).strip()
+        body = EVENT_MARKER_RE.sub("", task.group("body"))
+        body = REPLIED_MARKER_RE.sub("", body).strip()
         row = (int(task.group("task_id")), body)
         (completed if task.group("checked").lower() == "x" else pending).append(row)
 
@@ -195,6 +274,14 @@ def dashboard_snapshot(
             sender = " ".join(str(item.get("from", "")).split())
             name = item.get("filename") or item.get("kind") or "附件"
             rows.append((timestamp, event_index, f"{_hhmm(timestamp)} {sender}: [附件] {name}"))
+    for _fingerprint, event in outbox_rows(profile):
+        for message in event.get("messages", []):
+            body = " ".join(str(message.get("text", "")).split())
+            if not body:
+                continue
+            event_index += 1
+            timestamp = str(message.get("time", ""))
+            rows.append((timestamp, event_index, f"{_hhmm(timestamp)} {SELF_LABEL}: {body}"))
     rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
 
     events: list[str] = []
@@ -389,6 +476,7 @@ def main() -> int:
         with _cockpit_lock(profile.state_dir):
             if args.command == "reconcile":
                 result: dict[str, Any] = {"todo": reconcile_todos(profile)}
+                result["replied"] = mark_replied_tasks(profile)
             else:
                 result = {"watch": asyncio.run(watch(profile, bootstrap=args.bootstrap))}
                 if args.bootstrap:
@@ -398,6 +486,7 @@ def main() -> int:
                 else:
                     result["todo"] = reconcile_todos(profile)
                     result["injection"] = inject_pending(profile)
+                    result["replied"] = mark_replied_tasks(profile)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     except (OSError, RuntimeError, ValueError) as exc:

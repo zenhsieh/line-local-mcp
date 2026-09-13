@@ -11,6 +11,12 @@ env = { LINE_API_BASE = "https://archive.example.ts.net", LINE_API_TOKEN_COMMAND
 project_label = "Example Project"
 contact = "Canonical Contact"
 incoming_aliases = ["Canonical Contact", "Former Display Name"]
+# Optional: the "from" value the archive uses for messages you sent yourself. When
+# set, those outgoing messages are captured as evidence only -- never turned into a
+# task, never forwarded to agent injection -- so the cockpit can show the full
+# back-and-forth and flag pending tasks that already got a reply. Leave unset to
+# keep today's incoming-only behavior.
+# self_sender_id = "u0000000000000000000000000000000"
 state_dir = "~/.local/state/line-local-pipeline/example"
 todo_file = "~/.local/share/line-local-pipeline/example-tasks.md"
 poll_limit = 200

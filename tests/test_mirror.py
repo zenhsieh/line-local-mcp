@@ -56,7 +56,9 @@ class FakeArchive:
         raise AssertionError(path)
 
 
-def write_config(tmp_path: Path, *, profile_source: str = "mirror", extra: str = "") -> Path:
+def write_config(
+    tmp_path: Path, *, profile_source: str = "mirror", extra: str = "", profile_extra: str = ""
+) -> Path:
     config = tmp_path / "pipeline.toml"
     config.write_text(
         f"""
@@ -73,6 +75,7 @@ incoming_aliases = ["Client"]
 state_dir = "{tmp_path / 'state'}"
 todo_file = "{tmp_path / 'tasks.md'}"
 source = "{profile_source}"
+{profile_extra}
 """,
         encoding="utf-8",
     )
@@ -180,6 +183,40 @@ def test_watcher_reads_mirror_without_network(tmp_path):
     state = json.loads(profile.state_file.read_text())
     assert state["last_sync"]["source"] == "mirror"
     assert state["last_sync"]["last_sync_error"] is None
+
+
+def test_watcher_captures_outgoing_as_evidence_not_as_a_task(tmp_path):
+    config_path = write_config(tmp_path, profile_extra='self_sender_id = "Me"')
+    collect(load_collector_config(config_path), FakeArchive())
+    profile = load_profile(config_path, "client")
+
+    result = asyncio.run(watch(profile))
+    assert result["new_messages"] == 1  # still only the client's message
+    assert result["new_outgoing"] == 1
+
+    outbox = [json.loads(line) for line in profile.outbox_file.read_text().splitlines()]
+    assert len(outbox) == 1
+    assert outbox[0]["messages"] == [
+        {"time": "2026-01-01 10:01", "from": "Me", "chatId": "c1", "type": "text", "text": "hello"}
+    ]
+    inbox = [json.loads(line) for line in profile.inbox_file.read_text().splitlines()]
+    assert all(row["from"] != "Me" for event in inbox for row in event["messages"])
+
+    # a second pass sees nothing new in either direction
+    second = asyncio.run(watch(profile))
+    assert second["new_messages"] == 0
+    assert second["new_outgoing"] == 0
+    assert len(profile.outbox_file.read_text().splitlines()) == 1
+
+
+def test_outgoing_capture_is_off_without_self_sender_id(tmp_path):
+    config_path = write_config(tmp_path)  # no self_sender_id configured
+    collect(load_collector_config(config_path), FakeArchive())
+    profile = load_profile(config_path, "client")
+
+    result = asyncio.run(watch(profile))
+    assert result["new_outgoing"] == 0
+    assert not profile.outbox_file.exists()
 
 
 def test_watcher_reports_missing_mirror(tmp_path):

@@ -34,6 +34,7 @@ TASK_RE = re.compile(
 )
 NEXT_ID_RE = re.compile(r"^<!--\s*next-task-id:\s*(\d+)\s*-->$")
 PLACEHOLDER_RE = re.compile(r"\{(profile|project_label|target|prompt)\}")
+SELF_LABEL = "我"
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class Profile:
     prompt_template: str
     source: str = "mcp"
     mirror_db: Path | None = None
+    self_sender_id: str = ""
 
     @property
     def state_file(self) -> Path:
@@ -66,6 +68,23 @@ class Profile:
     @property
     def inbox_file(self) -> Path:
         return self.state_dir / "inbox.jsonl"
+
+    @property
+    def outbox_file(self) -> Path:
+        """Messages this account sent.  Evidence for the cockpit, never a task source."""
+        return self.state_dir / "outbox.jsonl"
+
+    @property
+    def outbox_state_file(self) -> Path:
+        """Seen-tracking for outgoing capture, kept separate from ``state_file``.
+
+        Outgoing fingerprints have always been folded into the main incoming
+        seen-set (it never filtered by direction), so a profile that enables
+        ``self_sender_id`` after months of running would otherwise find every past
+        reply already "seen" and silently skip the very backlog it needs to
+        backfill.  A dedicated tracker lets enabling the flag catch up on history.
+        """
+        return self.state_dir / "outbox-state.json"
 
     @property
     def lock_file(self) -> Path:
@@ -164,6 +183,7 @@ def load_profile(config_path: Path, name: str) -> Profile:
         ),
         source=source,
         mirror_db=Path(_expand(mirror_db)) if mirror_db else None,
+        self_sender_id=str(raw.get("self_sender_id", "")).strip(),
     )
 
 
@@ -316,6 +336,17 @@ async def watch(profile: Profile, bootstrap: bool = False) -> dict[str, Any]:
             row for fingerprint, row in attachment_rows
             if fingerprint not in seen and row.get("from") in profile.incoming_aliases
         ]
+        outbox_state = _load_json(profile.outbox_state_file, {"seen": []})
+        outbox_seen = set(outbox_state.get("seen", []))
+        outgoing_messages = [
+            row
+            for fingerprint, row in message_rows
+            if fingerprint not in outbox_seen
+            and profile.self_sender_id
+            and row.get("from") == profile.self_sender_id
+            and row.get("type") == "text"
+            and str(row.get("text", "")).strip()
+        ]
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         if not bootstrap and (incoming_messages or incoming_attachments):
             _append_jsonl(profile.inbox_file, {
@@ -326,6 +357,14 @@ async def watch(profile: Profile, bootstrap: bool = False) -> dict[str, Any]:
                 "messages": sorted(incoming_messages, key=lambda row: str(row.get("time", ""))),
                 "attachments": sorted(incoming_attachments, key=lambda row: str(row.get("time", ""))),
             })
+        if not bootstrap and outgoing_messages:
+            # Evidence only: never assigned a task, never forwarded to agent injection.
+            _append_jsonl(profile.outbox_file, {
+                "detected_at": now,
+                "profile": profile.name,
+                "contact": profile.contact,
+                "messages": sorted(outgoing_messages, key=lambda row: str(row.get("time", ""))),
+            })
         newest = [fingerprint for fingerprint, _row in message_rows + attachment_rows]
         merged = list(dict.fromkeys(newest + list(state.get("seen", []))))
         _write_private(profile.state_file, {
@@ -335,19 +374,30 @@ async def watch(profile: Profile, bootstrap: bool = False) -> dict[str, Any]:
             "seen": merged[: profile.keep_fingerprints],
             "last_sync": sync,
         })
+        if profile.self_sender_id:
+            outbox_newest = [
+                fingerprint
+                for fingerprint, row in message_rows
+                if row.get("from") == profile.self_sender_id
+            ]
+            outbox_merged = list(dict.fromkeys(outbox_newest + list(outbox_state.get("seen", []))))
+            _write_private(
+                profile.outbox_state_file, {"seen": outbox_merged[: profile.keep_fingerprints]}
+            )
     return {
         "checked_at": now,
         "bootstrap": bootstrap,
         "new_messages": 0 if bootstrap else len(incoming_messages),
         "new_attachments": 0 if bootstrap else len(incoming_attachments),
+        "new_outgoing": 0 if bootstrap else len(outgoing_messages),
         "inbox": str(profile.inbox_file),
     }
 
 
-def inbox_rows(profile: Profile) -> list[tuple[str, dict[str, Any]]]:
+def _read_jsonl_rows(path: Path) -> list[tuple[str, dict[str, Any]]]:
     rows = []
     try:
-        lines = profile.inbox_file.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return rows
     for raw in lines:
@@ -357,6 +407,15 @@ def inbox_rows(profile: Profile) -> list[tuple[str, dict[str, Any]]]:
             continue
         rows.append((hashlib.sha256(raw.encode()).hexdigest(), event))
     return rows
+
+
+def inbox_rows(profile: Profile) -> list[tuple[str, dict[str, Any]]]:
+    return _read_jsonl_rows(profile.inbox_file)
+
+
+def outbox_rows(profile: Profile) -> list[tuple[str, dict[str, Any]]]:
+    """Outgoing evidence recorded by watch().  Never a task source."""
+    return _read_jsonl_rows(profile.outbox_file)
 
 
 def _resolve_target(profile: Profile) -> str:
@@ -544,6 +603,11 @@ def dashboard_text(profile: Profile) -> str:
                 events.append((str(message.get("time", "")), str(message["text"]).strip()))
         for item in event.get("attachments", []):
             events.append((str(item.get("time", "")), f"[attachment] {item.get('filename', '')}"))
+    for _fingerprint, event in outbox_rows(profile)[-20:]:
+        for message in event.get("messages", []):
+            text = str(message.get("text", "")).strip()
+            if text:
+                events.append((str(message.get("time", "")), f"{SELF_LABEL}: {text}"))
     events.sort(reverse=True)
     checked = _load_json(profile.state_file, {}).get("last_checked_at", "never")
     lines = [
