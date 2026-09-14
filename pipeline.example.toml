@@ -11,10 +11,19 @@ env = { LINE_API_BASE = "https://archive.example.ts.net", LINE_API_TOKEN_COMMAND
 project_label = "Example Project"
 contact = "Canonical Contact"
 incoming_aliases = ["Canonical Contact", "Former Display Name"]
+# Optional: the "from" value the archive uses for messages you sent yourself. When
+# set, those outgoing messages are captured as evidence only -- never turned into a
+# task, never forwarded to agent injection -- so the cockpit can show the full
+# back-and-forth and flag pending tasks that already got a reply. Leave unset to
+# keep today's incoming-only behavior.
+# self_sender_id = "u0000000000000000000000000000000"
 state_dir = "~/.local/state/line-local-pipeline/example"
 todo_file = "~/.local/share/line-local-pipeline/example-tasks.md"
 poll_limit = 200
 keep_fingerprints = 2000
+# Status badge stamped on newly created tasks.
+# Defaults to "LINE", or "EVENT" when source = "jsonl".
+new_task_status = "待分流"
 # source = "mirror" reads the collector's database instead of calling the archive.
 # source = "jsonl" reads a local append-only agent/event feed and additionally
 # requires source_file. Neither source needs the [profiles.example.mcp] table.
@@ -34,6 +43,9 @@ env = { LINE_API_BASE = "http://127.0.0.1:8765", LINE_API_TOKEN = "replace-via-p
 [profiles.example.injection]
 enabled = false
 target_strategy = "disabled"
+# "task-summary" forwards only the durable task reference; the full event stays in
+# the profile-local inbox and customer cockpit. Default "event" preserves legacy behavior.
+payload = "task-summary"
 prompt_template = "[{project_label} LINE] Review this event. Never reply to LINE: {prompt}"
 
 # Explicit stable agent name (never a hard-coded pane id):

@@ -1,31 +1,44 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
+from line_local_mcp import cockpit
 from line_local_mcp.cockpit import (
+    COMPLETION_MARKER_RE,
     EVENT_MARKER_RE,
+    REPLIED_MARKER_RE,
     USER_REVIEW_COLOR,
     _render,
     _source_labels,
+    _space_handle_input,
+    _space_render,
     _task_views,
     _user_review_status,
     dashboard_snapshot,
     latest_case_status,
+    mark_replied_tasks,
     pane_progress,
     reconcile_todos,
+    space_conversation_snapshot,
+    space_dashboard_snapshot,
+    space_queue_snapshot,
+    stamp_completed_tasks,
 )
-from line_local_mcp.pipeline import load_profile, todo_add
+from line_local_mcp.pipeline import _append_jsonl, load_profile, todo_add, watch
 
 
 def _profile(tmp_path: Path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     config = tmp_path / "pipeline.toml"
     config.write_text(
         f'''[profiles.case]
 project_label = "Synthetic Case"
 contact = "Synthetic Contact"
-state_dir = "{tmp_path / 'state'}"
-todo_file = "{tmp_path / 'todo.md'}"
+state_dir = "{tmp_path / "state"}"
+todo_file = "{tmp_path / "todo.md"}"
 
 [profiles.case.mcp]
 command = ["/bin/true"]
@@ -40,12 +53,14 @@ def test_event_becomes_one_durable_task_and_marker_is_hidden(tmp_path):
     profile.state_dir.mkdir(parents=True)
     event = {
         "fingerprint": "a" * 64,
-        "messages": [{
-            "time": "2026-09-09 09:00",
-            "from": "Synthetic Contact",
-            "type": "text",
-            "text": "Harmless test event",
-        }],
+        "messages": [
+            {
+                "time": "2026-09-09 09:00",
+                "from": "Synthetic Contact",
+                "type": "text",
+                "text": "Harmless test event",
+            }
+        ],
         "attachments": [],
     }
     profile.inbox_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
@@ -72,9 +87,11 @@ def test_deleted_event_task_is_not_recreated_and_id_is_not_reused(tmp_path):
     assert reconcile_todos(profile)["created"] == 1
     profile.todo_file.write_text(
         "\n".join(
-            line for line in profile.todo_file.read_text(encoding="utf-8").splitlines()
+            line
+            for line in profile.todo_file.read_text(encoding="utf-8").splitlines()
             if "First" not in line
-        ) + "\n",
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -106,7 +123,8 @@ source_file = "{source_file}"
     }
     profile.inbox_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
 
-    assert _source_labels(profile) == ("EVENT", "事件", "最新事件", "case_x 事件")
+    assert _source_labels(profile) == ("事件", "最新事件", "case_x 事件")
+    assert profile.new_task_status == "EVENT"
     assert reconcile_todos(profile)["created"] == 1
     todo = profile.todo_file.read_text(encoding="utf-8")
     assert "[EVENT] 事件 2026-09-10 09:00 pane_x: Done" in todo
@@ -331,3 +349,343 @@ def test_pane_progress_keeps_latest_event_and_renders_hierarchy(tmp_path):
         "· Synthetic Contact Control",
         "└─ ✓ worker_x Second step",
     ]
+
+def test_completion_date_is_stable_and_reopen_removes_it(tmp_path):
+    profile = _profile(tmp_path)
+    todo_add(profile, "Finish migration")
+    text = profile.todo_file.read_text().replace("- [ ]", "- [x]", 1)
+    profile.todo_file.write_text(text)
+
+    first = datetime.fromisoformat("2026-09-09T12:00:00+08:00")
+    later = datetime.fromisoformat("2026-09-10T12:00:00+08:00")
+    assert stamp_completed_tasks(profile, first)["stamped"] == 1
+    assert stamp_completed_tasks(profile, later)["retained"] == 1
+    text = profile.todo_file.read_text()
+    assert "[0909]" in text and "completed-at:2026-09-09" in text
+
+    profile.todo_file.write_text(text.replace("- [x]", "- [ ]", 1))
+    assert stamp_completed_tasks(profile, later)["reopened"] == 1
+    text = profile.todo_file.read_text()
+    assert "[0909]" not in text and not COMPLETION_MARKER_RE.search(text)
+
+
+def test_space_dashboard_is_task_only(tmp_path):
+    profile = _profile(tmp_path)
+    todo_add(profile, "Customer action needed")
+    profile.state_dir.mkdir(parents=True, exist_ok=True)
+    profile.inbox_file.write_text(
+        json.dumps({"messages": [{"text": "raw conversation must stay hidden"}]}) + "\n"
+    )
+
+    lanes = space_dashboard_snapshot([profile])
+    assert lanes[0]["pending"][0][1].endswith("Customer action needed")
+    assert "raw conversation must stay hidden" not in repr(lanes)
+
+
+def test_space_queue_scales_past_four_customers_and_orders_oldest_first(tmp_path):
+    profiles = []
+    for index in range(7):
+        profile = _profile(tmp_path / str(index))
+        todo_add(
+            profile,
+            f"[待分流] LINE 2026-09-{index + 1:02d}T09:00:00+08:00 Customer {index}",
+        )
+        profiles.append(profile)
+
+    lanes, queue = space_queue_snapshot(list(reversed(profiles)))
+
+    assert len(lanes) == 7
+    assert len(queue) == 7
+    assert [row["body"].split()[-2:] for row in queue] == [
+        ["Customer", str(index)] for index in range(7)
+    ]
+
+
+def test_space_conversation_only_contains_events_for_unfinished_tasks(tmp_path):
+    profile = _profile(tmp_path)
+    profile.state_dir.mkdir(parents=True)
+    pending_event = {
+        "fingerprint": "c" * 64,
+        "messages": [
+            {
+                "time": "2026-09-10T09:00:00+08:00",
+                "from": "Customer",
+                "type": "text",
+                "text": "Please handle this task",
+            }
+        ],
+        "attachments": [],
+    }
+    unrelated_event = {
+        "fingerprint": "d" * 64,
+        "messages": [
+            {
+                "time": "2026-09-10T09:01:00+08:00",
+                "from": "Customer",
+                "type": "text",
+                "text": "Unrelated conversation stays private",
+            }
+        ],
+        "attachments": [],
+    }
+    profile.inbox_file.write_text(json.dumps(pending_event) + "\n", encoding="utf-8")
+    assert reconcile_todos(profile)["created"] == 1
+    with profile.inbox_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(unrelated_event) + "\n")
+
+    conversations = space_conversation_snapshot(profile)
+    assert conversations == ["#01 09:00 Customer: Please handle this task"]
+    assert "Unrelated conversation" not in repr(conversations)
+
+    profile.todo_file.write_text(
+        profile.todo_file.read_text(encoding="utf-8").replace("- [ ]", "- [x]", 1),
+        encoding="utf-8",
+    )
+    assert space_conversation_snapshot(profile) == []
+
+
+def _jsonl_profile(tmp_path: Path, source_file: Path, label: str = "Event Case"):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    config = tmp_path / "pipeline.toml"
+    config.write_text(
+        f"""[profiles.case]
+project_label = "{label}"
+contact = "case_x"
+incoming_aliases = ["case_x", "worker_x"]
+state_dir = "{tmp_path / "state"}"
+todo_file = "{tmp_path / "todo.md"}"
+source = "jsonl"
+source_file = "{source_file}"
+""",
+        encoding="utf-8",
+    )
+    return load_profile(config, "case")
+
+
+def test_space_dashboard_serves_a_jsonl_lane_beside_a_line_lane(tmp_path, capsys):
+    """The pilot view is source-agnostic: a jsonl lane queues and renders like LINE."""
+
+    source = tmp_path / "events.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "time": "2026-09-11T09:00:00+08:00",
+                "from": "worker_x",
+                "type": "text",
+                "text": "Needs owner decision",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    event_lane = _jsonl_profile(tmp_path / "events", source)
+    line_lane = _profile(tmp_path / "line")
+    todo_add(line_lane, "LINE 2026-09-10T09:00:00+08:00 Customer ask", status="待分流")
+
+    assert asyncio.run(watch(event_lane))["new_messages"] == 1
+    assert reconcile_todos(event_lane)["created"] == 1
+
+    lanes, queue = space_queue_snapshot([event_lane, line_lane])
+    assert [lane["label"] for lane in lanes] == ["Event Case", "Synthetic Case"]
+    # oldest-first across both sources, and the jsonl task carries the generic labels
+    assert [row["label"] for row in queue] == ["Synthetic Case", "Event Case"]
+    assert queue[1]["body"] == (
+        "[EVENT] 事件 2026-09-11T09:00:00+08:00 worker_x: Needs owner decision"
+    )
+
+    assert space_conversation_snapshot(event_lane) == [
+        "#01 09:00 worker_x: Needs owner decision"
+    ]
+
+    _space_render([event_lane, line_lane], "SERVICE · PILOT", 0, 0)
+    rendered = capsys.readouterr().out
+    assert "Event Case · 待辦 事件" in rendered
+    assert "待辦 LINE" not in rendered
+
+    _space_render([event_lane, line_lane], "SERVICE · PILOT", 0, 1)
+    assert "Synthetic Case · 待辦 LINE" in capsys.readouterr().out
+
+
+def test_nested_task_keeps_its_indent_through_completion_and_reply_marking(tmp_path):
+    """Merged branches meet here: main rebuilds task lines, jsonl made indent meaningful."""
+
+    profile = _profile(tmp_path)
+    profile.state_dir.mkdir(parents=True)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 2 -->\n\n"
+        "  - [x] [01] [執行] nested dependency\n",
+        encoding="utf-8",
+    )
+
+    stamped = stamp_completed_tasks(profile, datetime.fromisoformat("2026-09-09T12:00:00+08:00"))
+    assert stamped["stamped"] == 1
+    line = next(
+        row
+        for row in profile.todo_file.read_text(encoding="utf-8").splitlines()
+        if "nested dependency" in row
+    )
+    assert line.startswith("  - [x] [01] ")
+    assert "completed-at:2026-09-09" in line
+
+    # the visible task body keeps the indent and drops every durable marker
+    _pending, completed, _events, _state = dashboard_snapshot(profile)
+    assert completed == [(1, "  [執行] [0909] nested dependency")]
+
+
+def test_cockpit_cli_reports_a_malformed_jsonl_row_instead_of_crashing(tmp_path, capsys, monkeypatch):
+    source = tmp_path / "events.jsonl"
+    source.write_text('["not", "an", "object"]\n', encoding="utf-8")
+    profile = _jsonl_profile(tmp_path / "events", source)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["line-local-case-cockpit", "--config", str(profile.state_dir.parent / "pipeline.toml"),
+         "run", "case"],
+    )
+    assert cockpit.main() == 1
+    assert "is not an object" in capsys.readouterr().err
+
+
+def test_space_customer_arrows_are_mouse_clickable():
+    targets = (12, 74, 76, 98, 100)
+
+    assert _space_handle_input("\x1b[<0;98;12M", 0, 0, 4, targets) == (0, 1)
+    assert _space_handle_input("\x1b[<0;100;12M", 0, 0, 4, targets) == (0, 1)
+    assert _space_handle_input("\x1b[<0;76;12M", 0, 0, 4, targets) == (0, 3)
+    assert _space_handle_input("\x1b[<0;77;12M", 0, 0, 4, targets) == (0, 0)
+    assert _space_handle_input("\x1b[<0;98;11M", 0, 0, 4, targets) == (0, 0)
+    assert _space_handle_input("\x1b[<0;98;12m", 0, 0, 4, targets) == (0, 0)
+
+
+def test_dashboard_shows_full_bidirectional_conversation(tmp_path):
+    profile = _profile(tmp_path)
+    profile.state_dir.mkdir(parents=True)
+    profile.inbox_file.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "time": "2026-09-09T09:00:00+08:00",
+                        "from": "Synthetic Contact",
+                        "type": "text",
+                        "text": "Ping",
+                    }
+                ],
+                "attachments": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _append_jsonl(
+        profile.outbox_file,
+        {
+            "messages": [
+                {
+                    "time": "2026-09-09T09:05:00+08:00",
+                    "from": "u-self",
+                    "type": "text",
+                    "text": "Pong",
+                }
+            ]
+        },
+    )
+
+    _pending, _completed, events, _state = dashboard_snapshot(profile)
+    assert events == ["09:05 我: Pong", "09:00 Synthetic Contact: Ping"]
+
+
+def test_mark_replied_tasks_flags_reply_without_closing_or_guessing_archive(tmp_path):
+    profile = _profile(tmp_path)
+    profile.state_dir.mkdir(parents=True)
+    # The real archive uses "YYYY-MM-DD HH:MM" (a space, not "T"); the marker regex
+    # must not silently fail to match this and re-mark the task on every run.
+    event = {
+        "fingerprint": "e" * 64,
+        "messages": [
+            {
+                "time": "2026-09-09 09:00",
+                "from": "Synthetic Contact",
+                "type": "text",
+                "text": "Need a callback",
+            }
+        ],
+        "attachments": [],
+    }
+    profile.inbox_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    assert reconcile_todos(profile)["created"] == 1
+
+    # No outgoing reply recorded yet: nothing gets marked.
+    assert mark_replied_tasks(profile) == {"marked": 0}
+    assert "已回覆" not in profile.todo_file.read_text(encoding="utf-8")
+
+    _append_jsonl(
+        profile.outbox_file,
+        {
+            "messages": [
+                {
+                    "time": "2026-09-09 16:52",
+                    "from": "u-self",
+                    "type": "text",
+                    "text": "好的 收到",
+                }
+            ]
+        },
+    )
+    assert mark_replied_tasks(profile) == {"marked": 1}
+    text = profile.todo_file.read_text(encoding="utf-8")
+    assert "[已回覆 16:52・歸檔未知]" in text
+    assert "- [ ] [01] " in text  # replying never auto-closes, and never drops the task id
+    assert REPLIED_MARKER_RE.search(text)
+
+    pending, completed, _events, _state = dashboard_snapshot(profile)
+    assert completed == []
+    assert pending == [
+        (1, "[LINE] [已回覆 16:52・歸檔未知] LINE 2026-09-09 09:00 Synthetic Contact: Need a callback")
+    ]
+    assert "<!-- replied-at" not in pending[0][1]  # hidden marker never leaks into display
+
+    # Idempotent across repeated full reconcile cycles: no duplicate badges, no
+    # renumbering, whether called directly or through the same path cockpit run uses.
+    for _ in range(3):
+        assert reconcile_todos(profile)["created"] == 0
+        assert mark_replied_tasks(profile) == {"marked": 0}
+    final = profile.todo_file.read_text(encoding="utf-8")
+    assert final.count("已回覆 16:52") == 1
+    assert final.count("<!-- replied-at") == 1
+    assert "- [ ] [01] " in final
+
+
+def test_mark_replied_tasks_ignores_outgoing_before_the_task(tmp_path):
+    profile = _profile(tmp_path)
+    profile.state_dir.mkdir(parents=True)
+    event = {
+        "fingerprint": "f" * 64,
+        "messages": [
+            {
+                "time": "2026-09-09T16:00:00+08:00",
+                "from": "Synthetic Contact",
+                "type": "text",
+                "text": "New ask after the earlier reply",
+            }
+        ],
+        "attachments": [],
+    }
+    profile.inbox_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    assert reconcile_todos(profile)["created"] == 1
+    _append_jsonl(
+        profile.outbox_file,
+        {
+            "messages": [
+                {
+                    "time": "2026-09-09T09:00:00+08:00",
+                    "from": "u-self",
+                    "type": "text",
+                    "text": "An earlier, unrelated reply",
+                }
+            ]
+        },
+    )
+
+    assert mark_replied_tasks(profile) == {"marked": 0}
+    assert "已回覆" not in profile.todo_file.read_text(encoding="utf-8")

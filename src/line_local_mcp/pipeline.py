@@ -36,6 +36,7 @@ TASK_RE = re.compile(
 )
 NEXT_ID_RE = re.compile(r"^<!--\s*next-task-id:\s*(\d+)\s*-->$")
 PLACEHOLDER_RE = re.compile(r"\{(profile|project_label|target|prompt)\}")
+SELF_LABEL = "我"
 
 
 @dataclass(frozen=True)
@@ -58,9 +59,12 @@ class Profile:
     target_resolver_command: tuple[str, ...]
     agent_command: tuple[str, ...]
     prompt_template: str
+    injection_payload: str
+    new_task_status: str
     source: str = "mcp"
     mirror_db: Path | None = None
     source_file: Path | None = None
+    self_sender_id: str = ""
 
     @property
     def state_file(self) -> Path:
@@ -69,6 +73,23 @@ class Profile:
     @property
     def inbox_file(self) -> Path:
         return self.state_dir / "inbox.jsonl"
+
+    @property
+    def outbox_file(self) -> Path:
+        """Messages this account sent.  Evidence for the cockpit, never a task source."""
+        return self.state_dir / "outbox.jsonl"
+
+    @property
+    def outbox_state_file(self) -> Path:
+        """Seen-tracking for outgoing capture, kept separate from ``state_file``.
+
+        Outgoing fingerprints have always been folded into the main incoming
+        seen-set (it never filtered by direction), so a profile that enables
+        ``self_sender_id`` after months of running would otherwise find every past
+        reply already "seen" and silently skip the very backlog it needs to
+        backfill.  A dedicated tracker lets enabling the flag catch up on history.
+        """
+        return self.state_dir / "outbox-state.json"
 
     @property
     def lock_file(self) -> Path:
@@ -139,6 +160,9 @@ def load_profile(config_path: Path, name: str) -> Profile:
     strategy = str(injection.get("target_strategy", "disabled"))
     if strategy not in {"disabled", "explicit", "resolver-command"}:
         raise ValueError("target_strategy must be disabled, explicit, or resolver-command")
+    injection_payload = str(injection.get("payload", "event"))
+    if injection_payload not in {"event", "task-summary"}:
+        raise ValueError("injection.payload must be event or task-summary")
 
     aliases = raw.get("incoming_aliases", [raw["contact"]])
     return Profile(
@@ -168,9 +192,15 @@ def load_profile(config_path: Path, name: str) -> Profile:
                 "do not reply to LINE or mutate live systems. Event: {prompt}",
             )
         ),
+        injection_payload=injection_payload,
+        new_task_status=(
+            str(raw.get("new_task_status", "")).strip()
+            or ("EVENT" if source == "jsonl" else "LINE")
+        ),
         source=source,
         mirror_db=Path(_expand(mirror_db)) if mirror_db else None,
         source_file=Path(_expand(source_file)) if source_file else None,
+        self_sender_id=str(raw.get("self_sender_id", "")).strip(),
     )
 
 
@@ -285,10 +315,14 @@ def _fetch_from_mirror(profile: Profile) -> tuple[list[dict[str, Any]], list[dic
 
     assert profile.mirror_db is not None
     if not profile.mirror_db.exists():
-        raise RuntimeError(f"mirror database {profile.mirror_db} does not exist yet; run the collector")
+        raise RuntimeError(
+            f"mirror database {profile.mirror_db} does not exist yet; run the collector"
+        )
     mirror = Mirror(profile.mirror_db, readonly=True)
     try:
-        messages = [row for _fp, row in mirror.latest(profile.contact, "message", profile.poll_limit)]
+        messages = [
+            row for _fp, row in mirror.latest(profile.contact, "message", profile.poll_limit)
+        ]
         attachments = [
             row for _fp, row in mirror.latest(profile.contact, "attachment", profile.poll_limit)
         ]
@@ -358,19 +392,19 @@ async def _fetch(profile: Profile) -> tuple[list[dict[str, Any]], list[dict[str,
         stdio_client(_server_parameters(profile)) as streams,
         ClientSession(*streams) as session,
     ):
-            await session.initialize()
-            sync = _tool_json(await session.call_tool("line_sync", {}))
-            messages = _tool_json(
-                await session.call_tool(
-                    "line_get_messages", {"contact": profile.contact, "limit": profile.poll_limit}
-                )
-            ).get("messages", [])
-            attachments = _tool_json(
-                await session.call_tool(
-                    "line_list_attachments",
-                    {"contact": profile.contact, "limit": profile.poll_limit},
-                )
-            ).get("attachments", [])
+        await session.initialize()
+        sync = _tool_json(await session.call_tool("line_sync", {}))
+        messages = _tool_json(
+            await session.call_tool(
+                "line_get_messages", {"contact": profile.contact, "limit": profile.poll_limit}
+            )
+        ).get("messages", [])
+        attachments = _tool_json(
+            await session.call_tool(
+                "line_list_attachments",
+                {"contact": profile.contact, "limit": profile.poll_limit},
+            )
+        ).get("attachments", [])
     return messages, attachments, sync
 
 
@@ -415,48 +449,91 @@ async def watch(profile: Profile, bootstrap: bool = False) -> dict[str, Any]:
         message_rows = _message_rows(messages)
         attachment_rows = _attachment_rows(attachments)
         incoming_messages = [
-            row for fingerprint, row in message_rows
+            row
+            for fingerprint, row in message_rows
             if fingerprint not in seen
             and row.get("from") in profile.incoming_aliases
             and row.get("type") == "text"
             and str(row.get("text", "")).strip()
         ]
         incoming_attachments = [
-            row for fingerprint, row in attachment_rows
+            row
+            for fingerprint, row in attachment_rows
             if fingerprint not in seen and row.get("from") in profile.incoming_aliases
+        ]
+        outbox_state = _load_json(profile.outbox_state_file, {"seen": []})
+        outbox_seen = set(outbox_state.get("seen", []))
+        outgoing_messages = [
+            row
+            for fingerprint, row in message_rows
+            if fingerprint not in outbox_seen
+            and profile.self_sender_id
+            and row.get("from") == profile.self_sender_id
+            and row.get("type") == "text"
+            and str(row.get("text", "")).strip()
         ]
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         if not bootstrap and (incoming_messages or incoming_attachments):
-            _append_jsonl(profile.inbox_file, {
-                "detected_at": now,
-                "profile": profile.name,
-                "project_label": profile.project_label,
-                "contact": profile.contact,
-                "messages": sorted(incoming_messages, key=lambda row: str(row.get("time", ""))),
-                "attachments": sorted(incoming_attachments, key=lambda row: str(row.get("time", ""))),
-            })
+            _append_jsonl(
+                profile.inbox_file,
+                {
+                    "detected_at": now,
+                    "profile": profile.name,
+                    "project_label": profile.project_label,
+                    "contact": profile.contact,
+                    "messages": sorted(incoming_messages, key=lambda row: str(row.get("time", ""))),
+                    "attachments": sorted(
+                        incoming_attachments, key=lambda row: str(row.get("time", ""))
+                    ),
+                },
+            )
+        if not bootstrap and outgoing_messages:
+            # Evidence only: never assigned a task, never forwarded to agent injection.
+            _append_jsonl(
+                profile.outbox_file,
+                {
+                    "detected_at": now,
+                    "profile": profile.name,
+                    "contact": profile.contact,
+                    "messages": sorted(outgoing_messages, key=lambda row: str(row.get("time", ""))),
+                },
+            )
         newest = [fingerprint for fingerprint, _row in message_rows + attachment_rows]
         merged = list(dict.fromkeys(newest + list(state.get("seen", []))))
-        _write_private(profile.state_file, {
-            "profile": profile.name,
-            "contact": profile.contact,
-            "last_checked_at": now,
-            "seen": merged[: profile.keep_fingerprints],
-            "last_sync": sync,
-        })
+        _write_private(
+            profile.state_file,
+            {
+                "profile": profile.name,
+                "contact": profile.contact,
+                "last_checked_at": now,
+                "seen": merged[: profile.keep_fingerprints],
+                "last_sync": sync,
+            },
+        )
+        if profile.self_sender_id:
+            outbox_newest = [
+                fingerprint
+                for fingerprint, row in message_rows
+                if row.get("from") == profile.self_sender_id
+            ]
+            outbox_merged = list(dict.fromkeys(outbox_newest + list(outbox_state.get("seen", []))))
+            _write_private(
+                profile.outbox_state_file, {"seen": outbox_merged[: profile.keep_fingerprints]}
+            )
     return {
         "checked_at": now,
         "bootstrap": bootstrap,
         "new_messages": 0 if bootstrap else len(incoming_messages),
         "new_attachments": 0 if bootstrap else len(incoming_attachments),
+        "new_outgoing": 0 if bootstrap else len(outgoing_messages),
         "inbox": str(profile.inbox_file),
     }
 
 
-def inbox_rows(profile: Profile) -> list[tuple[str, dict[str, Any]]]:
+def _read_jsonl_rows(path: Path) -> list[tuple[str, dict[str, Any]]]:
     rows = []
     try:
-        lines = profile.inbox_file.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return rows
     for raw in lines:
@@ -466,6 +543,15 @@ def inbox_rows(profile: Profile) -> list[tuple[str, dict[str, Any]]]:
             continue
         rows.append((hashlib.sha256(raw.encode()).hexdigest(), event))
     return rows
+
+
+def inbox_rows(profile: Profile) -> list[tuple[str, dict[str, Any]]]:
+    return _read_jsonl_rows(profile.inbox_file)
+
+
+def outbox_rows(profile: Profile) -> list[tuple[str, dict[str, Any]]]:
+    """Outgoing evidence recorded by watch().  Never a task source."""
+    return _read_jsonl_rows(profile.outbox_file)
 
 
 def _resolve_target(profile: Profile) -> str:
@@ -519,11 +605,68 @@ def set_injection_switch(profile: Profile, enabled: bool) -> dict[str, Any]:
                 seen_set.add(fingerprint)
                 skipped += 1
         _write_private(profile.injection_state_file, {"seen": seen[-profile.keep_fingerprints :]})
-    _write_private(profile.injection_override_file, {
+    _write_private(
+        profile.injection_override_file,
+        {
+            "enabled": enabled,
+            "changed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        },
+    )
+    return {
         "enabled": enabled,
-        "changed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-    })
-    return {"enabled": enabled, "configured": profile.injection_configured, "backlog_skipped": skipped}
+        "configured": profile.injection_configured,
+        "backlog_skipped": skipped,
+    }
+
+
+def _event_task_summary(profile: Profile, fingerprint: str, event: dict[str, Any]) -> str:
+    """Return the durable task reference without forwarding the full conversation."""
+
+    marker = f"<!-- line-event:{fingerprint} -->"
+    try:
+        todo_lines = profile.todo_file.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        todo_lines = []
+    for line in todo_lines:
+        task = TASK_RE.match(line)
+        if not task or marker not in line:
+            continue
+        body = re.sub(r"\s*<!-- [^>]+ -->", "", task.group("body")).strip()
+        return json.dumps(
+            {
+                "lane": profile.name,
+                "project_label": profile.project_label,
+                "task_id": int(task.group("task_id")) if task.group("task_id") else None,
+                "task": body,
+                "message_count": len(event.get("messages", [])),
+                "attachment_count": len(event.get("attachments", [])),
+                "detail_location": "customer Case Cockpit",
+            },
+            ensure_ascii=False,
+        )
+
+    messages = event.get("messages", [])
+    attachments = event.get("attachments", [])
+    if messages:
+        first = messages[0]
+        summary = " ".join(str(first.get("text", "")).split())[:240]
+    elif attachments:
+        first = attachments[0]
+        summary = f"[attachment] {first.get('filename') or first.get('kind') or ''}"[:240]
+    else:
+        summary = "LINE archive event"
+    return json.dumps(
+        {
+            "lane": profile.name,
+            "project_label": profile.project_label,
+            "task_id": None,
+            "task": summary,
+            "message_count": len(messages),
+            "attachment_count": len(attachments),
+            "detail_location": "customer Case Cockpit",
+        },
+        ensure_ascii=False,
+    )
 
 
 def inject_pending(profile: Profile) -> dict[str, int]:
@@ -542,19 +685,26 @@ def inject_pending(profile: Profile) -> dict[str, int]:
             continue
         try:
             target = _resolve_target(profile)
-            raw_event = json.dumps(event, ensure_ascii=False)
+            raw_event = (
+                _event_task_summary(profile, fingerprint, event)
+                if profile.injection_payload == "task-summary"
+                else json.dumps(event, ensure_ascii=False)[:12000]
+            )
             prompt = profile.prompt_template.format(
                 profile=profile.name,
                 project_label=profile.project_label,
                 target=target,
-                prompt=raw_event[:12000],
+                prompt=raw_event,
             )
-            argv = _render_argv(profile.agent_command, {
-                "profile": profile.name,
-                "project_label": profile.project_label,
-                "target": target,
-                "prompt": prompt,
-            })
+            argv = _render_argv(
+                profile.agent_command,
+                {
+                    "profile": profile.name,
+                    "project_label": profile.project_label,
+                    "target": target,
+                    "prompt": prompt,
+                },
+            )
             result = subprocess.run(argv, text=True, capture_output=True, check=False, timeout=30)
             if result.returncode:
                 failed += 1
@@ -595,8 +745,8 @@ def _ensure_task_ids_locked(profile: Profile) -> list[str]:
         while next_id in used:
             next_id += 1
         lines[index] = (
-            f'{task.group("indent")}{task.group("prefix")}'
-            f'[{next_id:02d}] {task.group("body")}'
+            f"{task.group('indent')}{task.group('prefix')}"
+            f"[{next_id:02d}] {task.group('body')}"
         )
         used.add(next_id)
         next_id += 1
@@ -656,8 +806,8 @@ def dashboard_text(profile: Profile) -> str:
         if not task:
             continue
         row = (
-            f'{int(task.group("task_id")):02d} '
-            f'{task.group("indent")}{task.group("body")}'
+            f"{int(task.group('task_id')):02d} "
+            f"{task.group('indent')}{task.group('body')}"
         )
         (completed if task.group("checked").lower() == "x" else pending).append(row)
     events = []
@@ -667,6 +817,11 @@ def dashboard_text(profile: Profile) -> str:
                 events.append((str(message.get("time", "")), str(message["text"]).strip()))
         for item in event.get("attachments", []):
             events.append((str(item.get("time", "")), f"[attachment] {item.get('filename', '')}"))
+    for _fingerprint, event in outbox_rows(profile)[-20:]:
+        for message in event.get("messages", []):
+            text = str(message.get("text", "")).strip()
+            if text:
+                events.append((str(message.get("time", "")), f"{SELF_LABEL}: {text}"))
     events.sort(reverse=True)
     checked = _load_json(profile.state_file, {}).get("last_checked_at", "never")
     source_name = "events" if profile.source == "jsonl" else "LINE"
