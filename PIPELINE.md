@@ -69,6 +69,20 @@ source file. `incoming_aliases` should include every sender display
 name which represents that contact. Files from different customers must never share a
 state directory.
 
+`new_task_status` sets the status badge stamped on newly created tasks. It defaults to
+`LINE`, or `EVENT` for a `jsonl` profile; set it explicitly to route a lane into a
+different triage bucket (`待分流`, for example).
+
+`self_sender_id` is optional and names the `from` value the archive uses for messages
+*you* sent. When set, those outgoing messages are recorded in a separate `outbox.jsonl`
+as **evidence only**: they never become tasks and are never forwarded to agent
+injection. The cockpit then renders the full back-and-forth and flags pending tasks that
+already got a reply. Replying is not resolving, so that flag never closes a task, and it
+carries the archive dimension separately (`歸檔未知` until a profile is given a concrete,
+verifiable archive check) rather than letting an acknowledgement read as a hand-off.
+Outgoing fingerprints are tracked in their own `outbox-state.json`, so enabling the flag
+on a long-running profile backfills history instead of finding it all already "seen".
+
 The MCP subprocess can be defined directly with `mcp.command` and `mcp.env`, or read
 from one named server in a Claude-compatible JSON file with `mcp.config_file` and
 `mcp.server_name`. `$VARS` and `~` are expanded. Keep bearer tokens out of tracked
@@ -85,6 +99,24 @@ Agent delivery supports only these target strategies:
 `agent_command` is an argv array with optional `{target}`, `{prompt}`, `{profile}` and
 `{project_label}` placeholders. It is executed without a shell. Never configure it to
 call a LINE-send command.
+
+`injection.payload` chooses what reaches that command. `event` (default) forwards the
+whole event; `task-summary` forwards only the durable task reference — lane, task id,
+one-line task, and counts — leaving the conversation in the profile-local inbox and the
+customer cockpit.
+
+## Dashboards
+
+`line-local-case-cockpit dashboard <profile>` is the single-case view: 待辦 / 待核准 /
+完成 tabs on the left, the source's latest rows on the right. A `jsonl` profile relabels
+itself (事件 rather than LINE) and renders the pane-progress tree instead of a flat
+message list.
+
+`line-local-case-cockpit space-dashboard <profile>...` is the task-only pilot view over
+several lanes at once: one flattened, oldest-first queue on the left and, for the
+selected lane, only the source rows its unfinished tasks actually reference. It is
+source-agnostic — `mcp`, `mirror`, and `jsonl` lanes can sit side by side, and each
+lane's panel is labelled from its own source.
 
 ## If you fork this to add sending
 
