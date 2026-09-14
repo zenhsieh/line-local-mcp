@@ -21,6 +21,7 @@ state_dir = "~/.local/state/line-local-pipeline/example"
 todo_file = "~/.local/share/line-local-pipeline/example-tasks.md"
 poll_limit = 200
 keep_fingerprints = 2000
+new_task_status = "待分流"
 # source = "mirror" reads the collector's database instead of calling the archive.
 # With source = "mirror" the [profiles.example.mcp] table below is not needed.
 source = "mcp"
@@ -38,6 +39,9 @@ env = { LINE_API_BASE = "http://127.0.0.1:8765", LINE_API_TOKEN = "replace-via-p
 [profiles.example.injection]
 enabled = false
 target_strategy = "disabled"
+# "task-summary" forwards only the durable task reference; the full event stays in
+# the profile-local inbox and customer cockpit. Default "event" preserves legacy behavior.
+payload = "task-summary"
 prompt_template = "[{project_label} LINE] Review this event. Never reply to LINE: {prompt}"
 
 # Explicit stable agent name (never a hard-coded pane id):

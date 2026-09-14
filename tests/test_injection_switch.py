@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from line_local_mcp.cockpit import _handle_input, _injection_badge, _width, toggle_injection
+from line_local_mcp.cockpit import (
+    _handle_input,
+    _injection_badge,
+    _width,
+    reconcile_todos,
+    toggle_injection,
+)
 from line_local_mcp.pipeline import (
     _append_jsonl,
     inject_pending,
@@ -14,7 +20,7 @@ from line_local_mcp.pipeline import (
 )
 
 
-def make(tmp_path: Path, *, injection: bool) -> object:
+def make(tmp_path: Path, *, injection: bool, payload: str = "event") -> object:
     config = tmp_path / "pipeline.toml"
     block = (
         f"""
@@ -22,7 +28,8 @@ def make(tmp_path: Path, *, injection: bool) -> object:
 enabled = true
 target_strategy = "explicit"
 target = "reviewer"
-agent_command = ["{tmp_path / 'fake-agent.sh'}", "{{target}}", "{{prompt}}"]
+payload = "{payload}"
+agent_command = ["{tmp_path / "fake-agent.sh"}", "{{target}}", "{{prompt}}"]
 """
         if injection
         else ""
@@ -32,8 +39,8 @@ agent_command = ["{tmp_path / 'fake-agent.sh'}", "{{target}}", "{{prompt}}"]
 [profiles.client]
 project_label = "Client"
 contact = "Client"
-state_dir = "{tmp_path / 'state'}"
-todo_file = "{tmp_path / 'tasks.md'}"
+state_dir = "{tmp_path / "state"}"
+todo_file = "{tmp_path / "tasks.md"}"
 [profiles.client.mcp]
 command = ["/bin/true"]
 {block}
@@ -41,13 +48,15 @@ command = ["/bin/true"]
         encoding="utf-8",
     )
     script = tmp_path / "fake-agent.sh"
-    script.write_text("#!/bin/sh\nprintf '%s\\n' \"$2\" >> \"$(dirname \"$0\")/delivered.log\"\n")
+    script.write_text('#!/bin/sh\nprintf \'%s\\n\' "$2" >> "$(dirname "$0")/delivered.log"\n')
     script.chmod(0o700)
     return load_profile(config, "client")
 
 
 def event(text: str) -> dict:
-    return {"messages": [{"time": "2026-01-01 10:00", "from": "Client", "type": "text", "text": text}]}
+    return {
+        "messages": [{"time": "2026-01-01 10:00", "from": "Client", "type": "text", "text": text}]
+    }
 
 
 def test_switch_off_pauses_without_consuming_backlog(tmp_path):
@@ -97,3 +106,33 @@ def test_dashboard_key_and_click_toggle(tmp_path):
     x = _width(" 待辦 99 ") + 2 + _width(" 已完成 99 ") + 2 + 3
     _handle_input(f"\x1b[<0;{x};11M", "pending", 0, 11, profile)
     assert injection_active(profile) is True
+
+
+def test_task_summary_payload_keeps_full_conversation_out_of_agent_context(tmp_path):
+    profile = make(tmp_path, injection=True, payload="task-summary")
+    _append_jsonl(
+        profile.inbox_file,
+        {
+            "messages": [
+                {
+                    "time": "2026-01-01 10:00",
+                    "from": "Client",
+                    "type": "text",
+                    "text": "Action needed",
+                },
+                {
+                    "time": "2026-01-01 10:01",
+                    "from": "Client",
+                    "type": "text",
+                    "text": "private follow-up must stay in customer cockpit",
+                },
+            ],
+            "attachments": [],
+        },
+    )
+    assert reconcile_todos(profile)["created"] == 1
+    assert inject_pending(profile)["sent"] == 1
+    delivered = (tmp_path / "delivered.log").read_text()
+    assert "Action needed" in delivered
+    assert "message_count" in delivered
+    assert "private follow-up must stay in customer cockpit" not in delivered
