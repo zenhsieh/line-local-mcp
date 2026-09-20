@@ -11,6 +11,8 @@ from line_local_mcp.cockpit import (
     EVENT_MARKER_RE,
     REPLIED_MARKER_RE,
     USER_REVIEW_COLOR,
+    _collapse_flapping_rows,
+    _flap_signature,
     _render,
     _source_labels,
     _space_handle_input,
@@ -263,6 +265,74 @@ def test_render_always_reserves_green_clear_status_line(tmp_path, monkeypatch, c
     first_line = capsys.readouterr().out.removeprefix("\033[2J\033[H").splitlines()[0]
     assert "\033[1;38;5;255;48;5;28m" in first_line
     assert "核准狀態｜無待核准事項 │ 尚無 durable 狀態" in first_line
+
+
+def test_flap_signature_ignores_state_and_timestamp_but_not_unrelated_text():
+    fired = "[進度] 事件 09-19 21:03 infra-fleet-alerts: 新告警：⚠ [pointer] edge-am62 讀不到"
+    cleared = "[進度] 事件 09-19 21:30 infra-fleet-alerts: 告警已消失：⚠ [pointer] edge-am62 讀不到"
+    other = "[進度] 事件 09-20 12:33 infra-fleet-alerts: 新告警：⚠ [hygiene] LINE watermark 過期"
+    plain = "[進行] Build artifact"
+
+    assert _flap_signature(fired) == _flap_signature(cleared) == "⚠ [pointer] edge-am62 讀不到"
+    assert _flap_signature(other) != _flap_signature(fired)
+    assert _flap_signature(plain) is None
+
+
+def test_collapse_flapping_rows_folds_only_consecutive_same_signature_runs():
+    rows = [
+        (1, "[進度] 事件 09-19 21:03 infra-fleet-alerts: 新告警：⚠ [pointer] am62 讀不到"),
+        (2, "[進度] 事件 09-19 21:30 infra-fleet-alerts: 告警已消失：⚠ [pointer] am62 讀不到"),
+        (3, "[進度] 事件 09-19 21:35 infra-fleet-alerts: 新告警：⚠ [pointer] am62 讀不到"),
+        (4, "[進度] 事件 09-20 12:33 infra-fleet-alerts: 新告警：⚠ [hygiene] watermark 過期"),
+        (5, "[進度] 事件 09-21 03:38 infra-fleet-alerts: 新告警：⚠ [pointer] am62 讀不到"),
+    ]
+
+    collapsed = _collapse_flapping_rows(rows)
+
+    # rows 1-3 fold into row 3 (their latest occurrence) with a ×3 count;
+    # row 4 is unrelated and stays untouched; row 5 repeats the am62 signature
+    # but only after row 4 broke the run, so it stays its own occurrence.
+    assert [task_id for task_id, _body in collapsed] == [3, 4, 5]
+    assert collapsed[0][1].endswith(" ×3")
+    assert "×" not in collapsed[1][1]
+    assert "×" not in collapsed[2][1]
+
+
+def test_render_pending_tab_collapses_a_flapping_alert_with_a_colored_count(
+    tmp_path, monkeypatch, capsys
+):
+    profile = _profile(tmp_path)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 5 -->\n\n"
+        "- [ ] [01] [進度] 事件 09-19 21:03 infra-fleet-alerts: "
+        "新告警：⚠ [pointer] edge-am62 讀不到\n"
+        "- [ ] [02] [進度] 事件 09-19 21:30 infra-fleet-alerts: "
+        "告警已消失：⚠ [pointer] edge-am62 讀不到\n"
+        "- [ ] [03] [進度] 事件 09-19 21:35 infra-fleet-alerts: "
+        "新告警：⚠ [pointer] edge-am62 讀不到\n"
+        "- [ ] [04] [進度] 事件 09-20 12:33 infra-fleet-alerts: "
+        "新告警：⚠ [hygiene] watermark 過期\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "line_local_mcp.cockpit.shutil.get_terminal_size",
+        lambda _fallback: __import__("os").terminal_size((140, 7)),
+    )
+
+    _render(profile, "pending", 0, False)
+
+    rendered = capsys.readouterr().out
+    left_rows = [line.split(" │ ", 1)[0] for line in rendered.splitlines()[1:-1]]
+    joined = "\n".join(left_rows)
+
+    # three flapping am62 rows collapse into one line under the latest task id
+    assert "03." in joined
+    assert "01." not in joined and "02." not in joined
+    assert "×3" in joined
+    # the colored badge wraps exactly the count, not the whole line
+    assert "\033[1;38;5;208m ×3\033[0m" in joined
+    # the unrelated alert is untouched and still its own row
+    assert "04." in joined and "watermark" in joined
 
 
 def test_latest_case_status_prefers_latest_progress(tmp_path):

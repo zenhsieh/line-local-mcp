@@ -846,12 +846,101 @@ def space_dashboard(profiles: list[Profile], watch_mode: bool, interval: float, 
             termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_termios)
 
 
-def _completed_item(item: str) -> str:
+def _completed_item(item: str, repeat: int = 1) -> str:
     item = re.sub(r"^\[[^\]]+\]\s*", "", item)
     completion = re.match(r"^\[(?P<stamp>\d{4})\]\s*", item)
+    # The repeat badge sits right after the completion bracket, not appended to
+    # the tail: a long alert body already gets "…"-truncated by `_fit` at the
+    # right edge, and a count nobody can see defeats the point of counting.
+    suffix = f" ×{repeat}" if repeat > 1 else ""
     if not completion:
-        return "[完成] " + item
-    return f"[{completion.group('stamp')}完成] " + item[completion.end() :]
+        return "[完成]" + suffix + " " + item
+    return f"[{completion.group('stamp')}完成]" + suffix + " " + item[completion.end() :]
+
+
+_LEADING_TAG_RE = re.compile(r"^\[[^\]]*\]\s*")
+_EVENT_HEADER_RE = re.compile(r"^\S+ \d{2}-\d{2} \d{2}:\d{2} [^:]+:\s*")
+_ALERT_STATE_RE = re.compile(r"^(新告警|告警已消失)：")
+REPEAT_MARK_RE = re.compile(r" ×\d+$")
+
+
+def _flap_signature(body: str) -> str | None:
+    """The alert identity a pending/completed row carries, ignoring state/timestamp.
+
+    Only messages that look like a `dgfleet`/fleet-alert appear/clear pair carry
+    a signature -- everything else returns None so it never gets folded into a
+    run. A wrong merge here would hide a distinct event under someone else's
+    count, which is worse than never collapsing at all. Leading `[tag]` markers
+    (status tag, and for completed rows a `[MMDD]` stamp on top of that) are
+    stripped first since both pending and completed bodies carry them.
+    """
+
+    rest = body
+    for _ in range(2):
+        stripped = _LEADING_TAG_RE.sub("", rest, count=1)
+        if stripped == rest:
+            break
+        rest = stripped
+    rest = _EVENT_HEADER_RE.sub("", rest, count=1)
+    state = _ALERT_STATE_RE.match(rest)
+    if not state:
+        return None
+    return rest[state.end() :].strip()
+
+
+def _collapse_flapping_rows(rows: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Fold a consecutive run of the same flapping alert into its latest row.
+
+    The durable task log keeps one entry per occurrence -- that's the record
+    the pipeline promises never to lose (`reconcile_todos`'s "exactly one
+    durable task per inbox event"). This only changes what the dashboard
+    *displays*: a chronic alert that fires and clears N times back-to-back
+    shows as one line carrying the latest state plus " ×N", instead of N
+    lines pushing everything else off the visible window. A gap of unrelated
+    events in between breaks the run on purpose, so an alert recurring after
+    other things happened still reads as a fresh occurrence, not a silent
+    increment on an old count.
+    """
+
+    collapsed: list[tuple[int, str]] = []
+    index = 0
+    total = len(rows)
+    while index < total:
+        task_id, body = rows[index]
+        signature = _flap_signature(body)
+        if signature is None:
+            collapsed.append((task_id, body))
+            index += 1
+            continue
+        run_end = index + 1
+        while run_end < total and _flap_signature(rows[run_end][1]) == signature:
+            run_end += 1
+        run_length = run_end - index
+        latest_id, latest_body = rows[run_end - 1]
+        if run_length > 1:
+            latest_body = f"{latest_body} ×{run_length}"
+        collapsed.append((latest_id, latest_body))
+        index = run_end
+    return collapsed
+
+
+def _place_repeat_badge(body: str) -> str:
+    """Move a trailing " ×N" repeat marker right after the body's leading tag.
+
+    Keeps it clear of `_fit`'s right-edge "…" truncation, the same reason
+    `_completed_item` places its own repeat suffix right after the completion
+    bracket instead of at the tail.
+    """
+
+    match = REPEAT_MARK_RE.search(body)
+    if not match:
+        return body
+    clean = REPEAT_MARK_RE.sub("", body)
+    tag = _LEADING_TAG_RE.match(clean)
+    marker = match.group(0).strip()
+    if tag:
+        return clean[: tag.end()] + marker + " " + clean[tag.end() :]
+    return marker + " " + clean
 
 
 def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> int:
@@ -865,11 +954,11 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     _source_name, latest_title, source_title = _source_labels(profile)
     views = _task_views(pending, completed)
     if active_tab == "pending":
-        selected = views["running"] + views["pending"]
+        selected = views["running"] + _collapse_flapping_rows(views["pending"])
     elif active_tab == "review":
         selected = views["review"]
     else:
-        selected = completed
+        selected = _collapse_flapping_rows(completed)
     review_status = _user_review_status(pending)
     latest_status = latest_case_status(profile)
     if profile.source == "jsonl":
@@ -881,9 +970,12 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
         if active_tab == "review":
             display_rows.extend(_review_display_rows(task_id, body, left_width))
         elif active_tab == "completed":
-            display_rows.append(f"{task_id:02d}. {_completed_item(body)}")
+            repeat_mark = REPEAT_MARK_RE.search(body)
+            repeat = int(repeat_mark.group(0).strip(" ×")) if repeat_mark else 1
+            clean_body = REPEAT_MARK_RE.sub("", body) if repeat_mark else body
+            display_rows.append(f"{task_id:02d}. {_completed_item(clean_body, repeat)}")
         else:
-            display_rows.append(f"{task_id:02d}. {body}")
+            display_rows.append(f"{task_id:02d}. {_place_repeat_badge(body)}")
     offset = min(max(0, offset), max(0, len(display_rows) - content_rows))
     visible = display_rows[offset : offset + content_rows]
     lines: list[str] = []
@@ -931,6 +1023,11 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
         if badge_render:
             badge, color = badge_render
             left_cell = left_cell.replace(badge, color + badge + RESET, 1)
+        repeat_badge = re.search(r" ×\d+", left_cell)
+        if repeat_badge:
+            left_cell = left_cell.replace(
+                repeat_badge.group(0), "\033[1;38;5;208m" + repeat_badge.group(0) + RESET, 1
+            )
         right_cell = _fit(right, right_width)
         if "[附件]" in right_cell:
             right_cell = right_cell.replace("[附件]", "\033[33m[附件]" + RESET, 1)
