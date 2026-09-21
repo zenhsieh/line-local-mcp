@@ -11,8 +11,8 @@ from line_local_mcp.cockpit import (
     EVENT_MARKER_RE,
     REPLIED_MARKER_RE,
     USER_REVIEW_COLOR,
-    _collapse_flapping_rows,
     _flap_signature,
+    _rebucket_flap_events,
     _render,
     _source_labels,
     _space_handle_input,
@@ -278,24 +278,42 @@ def test_flap_signature_ignores_state_and_timestamp_but_not_unrelated_text():
     assert _flap_signature(plain) is None
 
 
-def test_collapse_flapping_rows_folds_only_consecutive_same_signature_runs():
-    rows = [
+def test_rebucket_flap_events_files_by_latest_state_not_checkbox():
+    # everything lands in `pending` first, exactly as reconcile_todos writes it --
+    # an unchecked task regardless of whether the event is a firing or a clear.
+    pending = [
         (1, "[進度] 事件 09-19 21:03 infra-fleet-alerts: 新告警：⚠ [pointer] am62 讀不到"),
         (2, "[進度] 事件 09-19 21:30 infra-fleet-alerts: 告警已消失：⚠ [pointer] am62 讀不到"),
-        (3, "[進度] 事件 09-19 21:35 infra-fleet-alerts: 新告警：⚠ [pointer] am62 讀不到"),
-        (4, "[進度] 事件 09-20 12:33 infra-fleet-alerts: 新告警：⚠ [hygiene] watermark 過期"),
-        (5, "[進度] 事件 09-21 03:38 infra-fleet-alerts: 新告警：⚠ [pointer] am62 讀不到"),
+        (3, "[進度] 事件 09-20 12:33 infra-fleet-alerts: 新告警：⚠ [hygiene] watermark 過期"),
+        (4, "[待決] Approve exact publication"),
     ]
 
-    collapsed = _collapse_flapping_rows(rows)
+    kept_pending, kept_completed = _rebucket_flap_events(pending, completed=[])
 
-    # rows 1-3 fold into row 3 (their latest occurrence) with a ×3 count;
-    # row 4 is unrelated and stays untouched; row 5 repeats the am62 signature
-    # but only after row 4 broke the run, so it stays its own occurrence.
-    assert [task_id for task_id, _body in collapsed] == [3, 4, 5]
-    assert collapsed[0][1].endswith(" ×3")
-    assert "×" not in collapsed[1][1]
-    assert "×" not in collapsed[2][1]
+    # am62 fired then cleared -- its LATEST state is resolved, so it is filed
+    # under completed and gone from pending, not left sitting there forever.
+    assert [task_id for task_id, _body in kept_pending] == [3, 4]
+    assert [task_id for task_id, _body in kept_completed] == [2]
+    assert kept_completed[0][1].endswith(" ×2")
+    # the still-open hygiene alert and the ordinary decision task are untouched
+    assert kept_pending[0][1] == pending[2][1]
+    assert kept_pending[1][1] == pending[3][1]
+
+
+def test_rebucket_flap_events_reopens_pending_after_a_later_firing():
+    pending = [
+        (1, "[進度] 事件 09-19 21:03 infra-fleet-alerts: 新告警：⚠ [pointer] am62 讀不到"),
+        (2, "[進度] 事件 09-19 21:30 infra-fleet-alerts: 告警已消失：⚠ [pointer] am62 讀不到"),
+        (3, "[進度] 事件 09-20 03:38 infra-fleet-alerts: 新告警：⚠ [pointer] am62 讀不到"),
+    ]
+
+    kept_pending, kept_completed = _rebucket_flap_events(pending, completed=[])
+
+    # the alert re-fired after clearing, so it is open again -- filed under
+    # pending at its latest task id, carrying the full lifetime count.
+    assert kept_completed == []
+    assert [task_id for task_id, _body in kept_pending] == [3]
+    assert kept_pending[0][1].endswith(" ×3")
 
 
 def test_render_pending_tab_collapses_a_flapping_alert_with_a_colored_count(
@@ -333,6 +351,39 @@ def test_render_pending_tab_collapses_a_flapping_alert_with_a_colored_count(
     assert "\033[1;38;5;208m ×3\033[0m" in joined
     # the unrelated alert is untouched and still its own row
     assert "04." in joined and "watermark" in joined
+
+
+def test_render_moves_a_resolved_alert_from_pending_to_completed(
+    tmp_path, monkeypatch, capsys
+):
+    """A 告警已消失 that answers the last open firing retires it -- not a sibling row."""
+
+    profile = _profile(tmp_path)
+    profile.todo_file.write_text(
+        "# Tasks\n\n<!-- next-task-id: 3 -->\n\n"
+        "- [ ] [01] [進度] 事件 09-19 21:03 infra-fleet-alerts: "
+        "新告警：⚠ [pointer] edge-am62 讀不到\n"
+        "- [ ] [02] [進度] 事件 09-19 21:30 infra-fleet-alerts: "
+        "告警已消失：⚠ [pointer] edge-am62 讀不到\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "line_local_mcp.cockpit.shutil.get_terminal_size",
+        lambda _fallback: __import__("os").terminal_size((140, 7)),
+    )
+
+    _render(profile, "pending", 0, False)
+    pending_rendered = capsys.readouterr().out
+    assert "edge-am62" not in pending_rendered
+    assert "待辦 0" in pending_rendered
+
+    _render(profile, "completed", 0, False)
+    completed_rendered = capsys.readouterr().out
+    left_rows = [line.split(" │ ", 1)[0] for line in completed_rendered.splitlines()[1:-1]]
+    joined = "\n".join(left_rows)
+    assert "02." in joined
+    assert "edge-am62" in joined
+    assert "×2" in joined
 
 
 def test_latest_case_status_prefers_latest_progress(tmp_path):

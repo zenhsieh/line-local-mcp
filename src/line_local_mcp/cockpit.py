@@ -19,6 +19,7 @@ import termios
 import time
 import tty
 import unicodedata
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -402,6 +403,7 @@ def dashboard_snapshot(
         body = task.group("indent") + _clean_task_body(task.group("body"))
         row = (int(task.group("task_id")), body)
         (completed if task.group("checked").lower() == "x" else pending).append(row)
+    pending, completed = _rebucket_flap_events(pending, completed)
 
     rows: list[tuple[str, int, str]] = []
     event_index = 0
@@ -864,15 +866,16 @@ _ALERT_STATE_RE = re.compile(r"^(新告警|告警已消失)：")
 REPEAT_MARK_RE = re.compile(r" ×\d+$")
 
 
-def _flap_signature(body: str) -> str | None:
-    """The alert identity a pending/completed row carries, ignoring state/timestamp.
+def _flap_parts(body: str) -> tuple[str, bool] | None:
+    """(alert identity, is-firing) for a flap-shaped row, or None if it isn't one.
 
     Only messages that look like a `dgfleet`/fleet-alert appear/clear pair carry
-    a signature -- everything else returns None so it never gets folded into a
-    run. A wrong merge here would hide a distinct event under someone else's
-    count, which is worse than never collapsing at all. Leading `[tag]` markers
-    (status tag, and for completed rows a `[MMDD]` stamp on top of that) are
-    stripped first since both pending and completed bodies carry them.
+    a signature -- everything else returns None so it's never touched by the
+    rebucketing below. A wrong match here would hide a distinct event under
+    someone else's identity, which is worse than never collapsing at all.
+    Leading `[tag]` markers (status tag, and for completed rows a `[MMDD]`
+    stamp on top of that) are stripped first since both pending and completed
+    bodies carry them.
     """
 
     rest = body
@@ -885,43 +888,58 @@ def _flap_signature(body: str) -> str | None:
     state = _ALERT_STATE_RE.match(rest)
     if not state:
         return None
-    return rest[state.end() :].strip()
+    return rest[state.end() :].strip(), state.group(1) == "新告警"
 
 
-def _collapse_flapping_rows(rows: list[tuple[int, str]]) -> list[tuple[int, str]]:
-    """Fold a consecutive run of the same flapping alert into its latest row.
+def _flap_signature(body: str) -> str | None:
+    parts = _flap_parts(body)
+    return parts[0] if parts else None
 
-    The durable task log keeps one entry per occurrence -- that's the record
-    the pipeline promises never to lose (`reconcile_todos`'s "exactly one
-    durable task per inbox event"). This only changes what the dashboard
-    *displays*: a chronic alert that fires and clears N times back-to-back
-    shows as one line carrying the latest state plus " ×N", instead of N
-    lines pushing everything else off the visible window. A gap of unrelated
-    events in between breaks the run on purpose, so an alert recurring after
-    other things happened still reads as a fresh occurrence, not a silent
-    increment on an old count.
+
+def _rebucket_flap_events(
+    pending: list[tuple[int, str]], completed: list[tuple[int, str]]
+) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """Re-file alert-flap rows by their latest state, not their checkbox.
+
+    `reconcile_todos` writes one unchecked task per inbox event -- it has no
+    idea a firing and its later clear are the same story, so a resolved
+    alert sits in "pending" forever unless someone manually checks it off.
+    That inverts what "pending" is supposed to mean: once the clear has been
+    seen, nothing about that alert is actually outstanding. This looks at
+    every flap-shaped row from both buckets in chronological (task-id) order
+    and keeps exactly one row per alert identity: the latest occurrence,
+    filed under `pending` if that occurrence was a firing or `completed` if
+    it was a clear -- so a "告警已消失" event genuinely retires the "新告警"
+    it answers instead of sitting next to it. The row carries every
+    occurrence's count as a trailing " ×N" so a chronic flapper is still
+    visible as one, not silent. Non-flap rows are left exactly where they
+    already were.
     """
 
-    collapsed: list[tuple[int, str]] = []
-    index = 0
-    total = len(rows)
-    while index < total:
-        task_id, body = rows[index]
-        signature = _flap_signature(body)
-        if signature is None:
-            collapsed.append((task_id, body))
-            index += 1
-            continue
-        run_end = index + 1
-        while run_end < total and _flap_signature(rows[run_end][1]) == signature:
-            run_end += 1
-        run_length = run_end - index
-        latest_id, latest_body = rows[run_end - 1]
-        if run_length > 1:
-            latest_body = f"{latest_body} ×{run_length}"
-        collapsed.append((latest_id, latest_body))
-        index = run_end
-    return collapsed
+    flap_rows: list[tuple[int, str]] = []
+    kept_pending: list[tuple[int, str]] = []
+    kept_completed: list[tuple[int, str]] = []
+    for task_id, body in pending:
+        (flap_rows if _flap_parts(body) else kept_pending).append((task_id, body))
+    for task_id, body in completed:
+        (flap_rows if _flap_parts(body) else kept_completed).append((task_id, body))
+    flap_rows.sort(key=lambda row: row[0])
+
+    latest: dict[str, tuple[int, str, bool]] = {}
+    counts: Counter[str] = Counter()
+    for task_id, body in flap_rows:
+        signature, is_firing = _flap_parts(body)  # type: ignore[misc]
+        counts[signature] += 1
+        latest[signature] = (task_id, body, is_firing)
+
+    for signature, (task_id, body, is_firing) in latest.items():
+        count = counts[signature]
+        row = (task_id, f"{body} ×{count}" if count > 1 else body)
+        (kept_pending if is_firing else kept_completed).append(row)
+
+    kept_pending.sort(key=lambda row: row[0])
+    kept_completed.sort(key=lambda row: row[0])
+    return kept_pending, kept_completed
 
 
 def _place_repeat_badge(body: str) -> str:
@@ -954,11 +972,11 @@ def _render(profile: Profile, active_tab: str, offset: int, blink_on: bool) -> i
     _source_name, latest_title, source_title = _source_labels(profile)
     views = _task_views(pending, completed)
     if active_tab == "pending":
-        selected = views["running"] + _collapse_flapping_rows(views["pending"])
+        selected = views["running"] + views["pending"]
     elif active_tab == "review":
         selected = views["review"]
     else:
-        selected = _collapse_flapping_rows(completed)
+        selected = completed
     review_status = _user_review_status(pending)
     latest_status = latest_case_status(profile)
     if profile.source == "jsonl":
