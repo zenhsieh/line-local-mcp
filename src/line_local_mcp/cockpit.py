@@ -861,7 +861,7 @@ def _completed_item(item: str, repeat: int = 1) -> str:
 
 
 _LEADING_TAG_RE = re.compile(r"^\[[^\]]*\]\s*")
-_EVENT_HEADER_RE = re.compile(r"^\S+ \d{2}-\d{2} \d{2}:\d{2} [^:]+:\s*")
+_EVENT_HEADER_RE = re.compile(r"^\S+ (\d{2}-\d{2} \d{2}:\d{2}) [^:]+:\s*")
 _ALERT_STATE_RE = re.compile(r"^(新告警|告警已消失)：")
 _TRAILING_BATCH_RE = re.compile(r" \(\+\d+ (?:messages|attachments)\)$")
 REPEAT_MARK_RE = re.compile(r" ×\d+$")
@@ -889,7 +889,10 @@ def _flap_parts(body: str) -> tuple[str, bool] | None:
         if stripped == rest:
             break
         rest = stripped
-    rest = _EVENT_HEADER_RE.sub("", rest, count=1)
+    header = _EVENT_HEADER_RE.match(rest)
+    if not header:
+        return None
+    rest = rest[header.end() :]
     state = _ALERT_STATE_RE.match(rest)
     if not state:
         return None
@@ -900,6 +903,39 @@ def _flap_parts(body: str) -> tuple[str, bool] | None:
 def _flap_signature(body: str) -> str | None:
     parts = _flap_parts(body)
     return parts[0] if parts else None
+
+
+def _flap_compact_body(body: str) -> str | None:
+    """Drop the boilerplate a flap row's own text carries once it's bucketed.
+
+    `事件 MM-DD HH:MM infra-fleet-alerts: 新告警：` says nothing once the row
+    has been filed: pending already means open, completed already means
+    closed (and carries its own `[完成]`/`[MMDD完成]` badge), and the sender
+    is always the same one alias for this whole source. All of that is pure
+    width spent on saying the same thing every single line, in an already
+    narrow column. What's left -- the leading `[tag]`, the timestamp, and the
+    actual finding -- is everything a reader needs. Returns None (render the
+    body unchanged) for anything that isn't flap-shaped.
+    """
+
+    tag = ""
+    rest = body
+    for _ in range(2):
+        match = _LEADING_TAG_RE.match(rest)
+        if not match:
+            break
+        tag += match.group(0)
+        rest = rest[match.end() :]
+    header = _EVENT_HEADER_RE.match(rest)
+    if not header:
+        return None
+    when = header.group(1)
+    rest = rest[header.end() :]
+    state = _ALERT_STATE_RE.match(rest)
+    if not state:
+        return None
+    signature = _TRAILING_BATCH_RE.sub("", rest[state.end() :].strip())
+    return f"{tag}{when} {signature}"
 
 
 def _rebucket_flap_events(
@@ -953,7 +989,8 @@ def _rebucket_flap_events(
 
     for signature, (task_id, body, closed) in latest.items():
         count = counts[signature]
-        row = (task_id, f"{body} ×{count}" if count > 1 else body)
+        compact = _flap_compact_body(body) or body
+        row = (task_id, f"{compact} ×{count}" if count > 1 else compact)
         (kept_completed if closed else kept_pending).append(row)
 
     kept_pending.sort(key=lambda row: row[0])

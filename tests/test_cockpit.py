@@ -11,6 +11,7 @@ from line_local_mcp.cockpit import (
     EVENT_MARKER_RE,
     REPLIED_MARKER_RE,
     USER_REVIEW_COLOR,
+    _flap_compact_body,
     _flap_signature,
     _rebucket_flap_events,
     _render,
@@ -278,6 +279,19 @@ def test_flap_signature_ignores_state_and_timestamp_but_not_unrelated_text():
     assert _flap_signature(plain) is None
 
 
+def test_flap_compact_body_drops_boilerplate_but_keeps_tag_time_and_finding():
+    fired = "[進度] 事件 09-19 21:03 infra-fleet-alerts: 新告警：⚠ [pointer] edge-am62 讀不到"
+    other_source = "[EVENT] 事件 09-14 10:00 infra-fleet-alerts: 新告警：⚠ [host] pve01 連不上"
+    plain = "[進行] Build artifact"
+
+    # "事件"/the sender name/"新告警：" all say the same thing on every row of
+    # this source -- gone. The `[tag]`, the timestamp, and the actual finding
+    # (including the ⚠) survive untouched.
+    assert _flap_compact_body(fired) == "[進度] 09-19 21:03 ⚠ [pointer] edge-am62 讀不到"
+    assert _flap_compact_body(other_source) == "[EVENT] 09-14 10:00 ⚠ [host] pve01 連不上"
+    assert _flap_compact_body(plain) is None
+
+
 def test_rebucket_flap_events_files_by_latest_state_not_checkbox():
     # everything lands in `pending` first, exactly as reconcile_todos writes it --
     # an unchecked task regardless of whether the event is a firing or a clear.
@@ -295,8 +309,10 @@ def test_rebucket_flap_events_files_by_latest_state_not_checkbox():
     assert [task_id for task_id, _body in kept_pending] == [3, 4]
     assert [task_id for task_id, _body in kept_completed] == [2]
     assert kept_completed[0][1].endswith(" ×2")
-    # the still-open hygiene alert and the ordinary decision task are untouched
-    assert kept_pending[0][1] == pending[2][1]
+    # the still-open hygiene alert lost its "事件 ... infra-fleet-alerts: 新告警："
+    # boilerplate (redundant once a row is filed as pending) but kept its
+    # timestamp and the actual finding; the ordinary decision task is untouched
+    assert kept_pending[0][1] == "[進度] 09-20 12:33 ⚠ [hygiene] watermark 過期"
     assert kept_pending[1][1] == pending[3][1]
 
 
