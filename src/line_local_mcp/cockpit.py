@@ -863,6 +863,7 @@ def _completed_item(item: str, repeat: int = 1) -> str:
 _LEADING_TAG_RE = re.compile(r"^\[[^\]]*\]\s*")
 _EVENT_HEADER_RE = re.compile(r"^\S+ \d{2}-\d{2} \d{2}:\d{2} [^:]+:\s*")
 _ALERT_STATE_RE = re.compile(r"^(新告警|告警已消失)：")
+_TRAILING_BATCH_RE = re.compile(r" \(\+\d+ (?:messages|attachments)\)$")
 REPEAT_MARK_RE = re.compile(r" ×\d+$")
 
 
@@ -875,7 +876,11 @@ def _flap_parts(body: str) -> tuple[str, bool] | None:
     someone else's identity, which is worse than never collapsing at all.
     Leading `[tag]` markers (status tag, and for completed rows a `[MMDD]`
     stamp on top of that) are stripped first since both pending and completed
-    bodies carry them.
+    bodies carry them. A trailing "(+N messages)" batch-count suffix is also
+    stripped from the *signature* only (never from the displayed body) -- the
+    same alert firing then clearing can each land with a different batch size
+    if other inbox events happened to land in between, and that alone must
+    not stop the pair from matching.
     """
 
     rest = body
@@ -888,7 +893,8 @@ def _flap_parts(body: str) -> tuple[str, bool] | None:
     state = _ALERT_STATE_RE.match(rest)
     if not state:
         return None
-    return rest[state.end() :].strip(), state.group(1) == "新告警"
+    signature = _TRAILING_BATCH_RE.sub("", rest[state.end() :].strip())
+    return signature, state.group(1) == "新告警"
 
 
 def _flap_signature(body: str) -> str | None:
@@ -899,43 +905,56 @@ def _flap_signature(body: str) -> str | None:
 def _rebucket_flap_events(
     pending: list[tuple[int, str]], completed: list[tuple[int, str]]
 ) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
-    """Re-file alert-flap rows by their latest state, not their checkbox.
+    """Re-file alert-flap rows by their latest state, not just their own text.
 
     `reconcile_todos` writes one unchecked task per inbox event -- it has no
     idea a firing and its later clear are the same story, so a resolved
-    alert sits in "pending" forever unless someone manually checks it off.
-    That inverts what "pending" is supposed to mean: once the clear has been
-    seen, nothing about that alert is actually outstanding. This looks at
-    every flap-shaped row from both buckets in chronological (task-id) order
-    and keeps exactly one row per alert identity: the latest occurrence,
-    filed under `pending` if that occurrence was a firing or `completed` if
-    it was a clear -- so a "告警已消失" event genuinely retires the "新告警"
-    it answers instead of sitting next to it. The row carries every
+    alert sits in "pending" forever unless something closes it. That inverts
+    what "pending" is supposed to mean: once the clear has been seen, or a
+    human has checked the row off directly, nothing about that alert is
+    actually outstanding. This looks at every flap-shaped row from both
+    buckets in chronological (task-id) order and keeps exactly one row per
+    alert identity: the latest occurrence, filed under `pending` only if
+    that occurrence is *both* unchecked and a firing -- a checked box always
+    means closed regardless of its own wording, since a human (or an earlier
+    manual close) already made that call and a text-only reading must not
+    override it. A "告警已消失" event genuinely retires the "新告警" it
+    answers instead of sitting next to it. The row carries every
     occurrence's count as a trailing " ×N" so a chronic flapper is still
     visible as one, not silent. Non-flap rows are left exactly where they
     already were.
     """
 
-    flap_rows: list[tuple[int, str]] = []
+    flap_rows: list[tuple[int, str, bool]] = []  # (task_id, body, closed)
     kept_pending: list[tuple[int, str]] = []
     kept_completed: list[tuple[int, str]] = []
     for task_id, body in pending:
-        (flap_rows if _flap_parts(body) else kept_pending).append((task_id, body))
+        parts = _flap_parts(body)
+        if parts is None:
+            kept_pending.append((task_id, body))
+        else:
+            _signature, is_firing = parts
+            flap_rows.append((task_id, body, not is_firing))
     for task_id, body in completed:
-        (flap_rows if _flap_parts(body) else kept_completed).append((task_id, body))
+        parts = _flap_parts(body)
+        if parts is None:
+            kept_completed.append((task_id, body))
+        else:
+            # already checked -- closed no matter what its own text says
+            flap_rows.append((task_id, body, True))
     flap_rows.sort(key=lambda row: row[0])
 
     latest: dict[str, tuple[int, str, bool]] = {}
     counts: Counter[str] = Counter()
-    for task_id, body in flap_rows:
-        signature, is_firing = _flap_parts(body)  # type: ignore[misc]
+    for task_id, body, closed in flap_rows:
+        signature = _flap_signature(body)
         counts[signature] += 1
-        latest[signature] = (task_id, body, is_firing)
+        latest[signature] = (task_id, body, closed)
 
-    for signature, (task_id, body, is_firing) in latest.items():
+    for signature, (task_id, body, closed) in latest.items():
         count = counts[signature]
         row = (task_id, f"{body} ×{count}" if count > 1 else body)
-        (kept_pending if is_firing else kept_completed).append(row)
+        (kept_completed if closed else kept_pending).append(row)
 
     kept_pending.sort(key=lambda row: row[0])
     kept_completed.sort(key=lambda row: row[0])

@@ -316,6 +316,46 @@ def test_rebucket_flap_events_reopens_pending_after_a_later_firing():
     assert kept_pending[0][1].endswith(" ×3")
 
 
+def test_rebucket_flap_events_respects_an_already_checked_row_even_if_it_reads_open():
+    """A human (or an earlier manual close) checking the box always wins.
+
+    Regression: a batch of alerts from 2026-09-14 were each fired once and
+    then manually checked off (completed-at stamped) with no matching
+    "告警已消失" task ever created -- reopening them into pending just
+    because their own text still reads "新告警" undid that closure.
+    """
+
+    pending: list[tuple[int, str]] = []
+    completed = [
+        (62, "[EVENT] [0914] 事件 09-14 10:00 infra-fleet-alerts: 新告警：⚠ [host] pve01 連不上"),
+    ]
+
+    kept_pending, kept_completed = _rebucket_flap_events(pending, completed)
+
+    assert kept_pending == []
+    assert [task_id for task_id, _body in kept_completed] == [62]
+
+
+def test_flap_signature_ignores_a_trailing_batched_message_count():
+    """Regression: the same alert's fire and clear can each batch with a
+    different number of unrelated inbox messages landing at the same poll,
+    so `_task_summary`'s trailing "(+N messages)" must not be part of the
+    identity used to match them -- otherwise a "+1" fire and a "+2" clear
+    for the literal same alert never retire each other.
+    """
+
+    fired = "[進度] 事件 09-20 03:38 infra-fleet-alerts: 新告警：⚠ [host] edge-am62 連不上 (+1 messages)"
+    cleared = "[進度] 事件 09-20 22:46 infra-fleet-alerts: 告警已消失：⚠ [host] edge-am62 連不上 (+2 messages)"
+
+    assert _flap_signature(fired) == _flap_signature(cleared) == "⚠ [host] edge-am62 連不上"
+
+    pending = [(217, fired)]
+    completed = [(221, cleared)]
+    kept_pending, kept_completed = _rebucket_flap_events(pending, completed)
+    assert kept_pending == []
+    assert [task_id for task_id, _body in kept_completed] == [221]
+
+
 def test_render_pending_tab_collapses_a_flapping_alert_with_a_colored_count(
     tmp_path, monkeypatch, capsys
 ):
