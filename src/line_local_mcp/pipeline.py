@@ -161,8 +161,8 @@ def load_profile(config_path: Path, name: str) -> Profile:
     if strategy not in {"disabled", "explicit", "resolver-command"}:
         raise ValueError("target_strategy must be disabled, explicit, or resolver-command")
     injection_payload = str(injection.get("payload", "event"))
-    if injection_payload not in {"event", "task-summary"}:
-        raise ValueError("injection.payload must be event or task-summary")
+    if injection_payload not in {"event", "task-summary", "compact"}:
+        raise ValueError("injection.payload must be event, task-summary, or compact")
 
     aliases = raw.get("incoming_aliases", [raw["contact"]])
     return Profile(
@@ -669,6 +669,37 @@ def _event_task_summary(profile: Profile, fingerprint: str, event: dict[str, Any
     )
 
 
+_COMPACT_KIND = {"image": "圖", "file": "檔", "video": "影", "audio": "音", "sticker": "貼"}
+
+
+def _event_compact(event: dict[str, Any]) -> str:
+    """One short line per item: ``HH:MM text`` or ``HH:MM [圖 media_id]``.
+
+    Legend (documented for the receiving agent): 圖/檔/影/音/貼 = attachment kind,
+    ``✗`` = attachment not downloadable, the id after the kind is the media_id for
+    line_read_media.  Speaker is omitted because the profile already names the contact.
+    """
+
+    rows: list[tuple[str, str]] = []
+    for msg in event.get("messages", []):
+        text = " ".join(str(msg.get("text", "")).split())
+        if not text:
+            continue
+        rows.append((str(msg.get("time", "")), text[:400]))
+    for att in event.get("attachments", []):
+        kind = _COMPACT_KIND.get(str(att.get("kind", "")), str(att.get("kind", "") or "附"))
+        mark = "" if att.get("available", True) else "✗"
+        name = att.get("filename") if att.get("kind") == "file" else None
+        label = f"[{kind}{mark} {att.get('media_id', '')}" + (f" {name}" if name else "") + "]"
+        rows.append((str(att.get("time", "")), label))
+    rows.sort(key=lambda row: row[0])
+    out = []
+    for when, body in rows:
+        hhmm = when[-5:] if len(when) >= 5 else when
+        out.append(f"{hhmm} {body}".strip())
+    return " / ".join(out) or "(空事件)"
+
+
 def inject_pending(profile: Profile) -> dict[str, int]:
     if not profile.injection_configured:
         return {"sent": 0, "failed": 0, "disabled": 1, "paused": 0}
@@ -685,11 +716,12 @@ def inject_pending(profile: Profile) -> dict[str, int]:
             continue
         try:
             target = _resolve_target(profile)
-            raw_event = (
-                _event_task_summary(profile, fingerprint, event)
-                if profile.injection_payload == "task-summary"
-                else json.dumps(event, ensure_ascii=False)[:12000]
-            )
+            if profile.injection_payload == "task-summary":
+                raw_event = _event_task_summary(profile, fingerprint, event)
+            elif profile.injection_payload == "compact":
+                raw_event = _event_compact(event)[:4000]
+            else:
+                raw_event = json.dumps(event, ensure_ascii=False)[:12000]
             prompt = profile.prompt_template.format(
                 profile=profile.name,
                 project_label=profile.project_label,

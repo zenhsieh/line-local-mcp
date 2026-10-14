@@ -151,3 +151,19 @@ def test_task_summary_payload_keeps_full_conversation_out_of_agent_context(tmp_p
     assert "Action needed" in delivered
     assert "message_count" in delivered
     assert "private follow-up must stay in customer cockpit" not in delivered
+
+
+def test_compact_payload_is_one_short_line_per_item():
+    from line_local_mcp.pipeline import _event_compact
+
+    event = {
+        "attachments": [
+            {"available": True, "kind": "image", "media_id": "111", "time": "2026-10-14 12:22"},
+            {"available": False, "kind": "file", "media_id": "222", "filename": "a.pdf", "time": "2026-10-14 12:23"},
+        ],
+        "messages": [
+            {"text": "感謝", "time": "2026-10-14 12:21", "type": "text"},
+            {"text": "", "time": "2026-10-14 12:21", "type": "image"},
+        ],
+    }
+    assert _event_compact(event) == "12:21 感謝 / 12:22 [圖 111] / 12:23 [檔✗ 222 a.pdf]"
