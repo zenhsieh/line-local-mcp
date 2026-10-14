@@ -60,6 +60,7 @@ class Profile:
     agent_command: tuple[str, ...]
     prompt_template: str
     injection_payload: str
+    skip_pleasantries: bool
     new_task_status: str
     source: str = "mcp"
     mirror_db: Path | None = None
@@ -193,6 +194,7 @@ def load_profile(config_path: Path, name: str) -> Profile:
             )
         ),
         injection_payload=injection_payload,
+        skip_pleasantries=bool(injection.get("skip_pleasantries", False)),
         new_task_status=(
             str(raw.get("new_task_status", "")).strip()
             or ("EVENT" if source == "jsonl" else "LINE")
@@ -700,6 +702,47 @@ def _event_compact(event: dict[str, Any]) -> str:
     return " / ".join(out) or "(空事件)"
 
 
+_PLEASANTRY_TOKENS = sorted(
+    {
+        "好的", "好喔", "好唷", "好囉", "好啦", "好", "嗯嗯", "恩恩", "嗯", "恩", "喔", "哦",
+        "謝謝", "感謝", "多謝", "謝啦", "謝了", "謝", "辛苦了", "辛苦", "收到", "了解", "瞭解",
+        "知道了", "沒問題", "ok", "okay", "讚", "好喔感謝", "麻煩了", "再麻煩了", "麻煩你了",
+    },
+    key=len,
+    reverse=True,
+)
+_PLEASANTRY_STRIP = re.compile(r"[\s\W_]+", re.UNICODE)
+
+
+def _is_pleasantry(event: dict[str, Any]) -> bool:
+    """True when the event is only courtesy text (thanks / ok / 嗯) with no attachment.
+
+    Such events stay in the inbox and Case Cockpit; they are just not injected.
+    Anything with an attachment, a number, or an unknown word is NOT a pleasantry.
+    """
+
+    if event.get("attachments"):
+        return False
+    texts = [str(m.get("text", "")) for m in event.get("messages", []) if str(m.get("text", "")).strip()]
+    if not texts:
+        return False
+    for text in texts:
+        rest = _PLEASANTRY_STRIP.sub("", text).lower()
+        if not rest:
+            continue
+        changed = True
+        while rest and changed:
+            changed = False
+            for token in _PLEASANTRY_TOKENS:
+                if rest.startswith(token):
+                    rest = rest[len(token):]
+                    changed = True
+                    break
+        if rest:
+            return False
+    return True
+
+
 def inject_pending(profile: Profile) -> dict[str, int]:
     if not profile.injection_configured:
         return {"sent": 0, "failed": 0, "disabled": 1, "paused": 0}
@@ -711,8 +754,15 @@ def inject_pending(profile: Profile) -> dict[str, int]:
     seen = list(state.get("seen", []))
     seen_set = set(seen)
     sent = failed = 0
+    skipped_pleasantries = 0
     for fingerprint, event in inbox_rows(profile):
         if fingerprint in seen_set:
+            continue
+        if profile.skip_pleasantries and _is_pleasantry(event):
+            seen.append(fingerprint)
+            seen_set.add(fingerprint)
+            _write_private(profile.injection_state_file, {"seen": seen[-profile.keep_fingerprints :]})
+            skipped_pleasantries += 1
             continue
         try:
             target = _resolve_target(profile)
@@ -748,7 +798,10 @@ def inject_pending(profile: Profile) -> dict[str, int]:
         seen_set.add(fingerprint)
         _write_private(profile.injection_state_file, {"seen": seen[-profile.keep_fingerprints :]})
         sent += 1
-    return {"sent": sent, "failed": failed, "disabled": 0, "paused": 0}
+    result = {"sent": sent, "failed": failed, "disabled": 0, "paused": 0}
+    if skipped_pleasantries:
+        result["skipped_pleasantries"] = skipped_pleasantries
+    return result
 
 
 def _ensure_task_ids_locked(profile: Profile) -> list[str]:

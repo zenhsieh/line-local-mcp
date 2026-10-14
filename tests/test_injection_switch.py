@@ -167,3 +167,18 @@ def test_compact_payload_is_one_short_line_per_item():
         ],
     }
     assert _event_compact(event) == "12:21 感謝 / 12:22 [圖 111] / 12:23 [檔✗ 222 a.pdf]"
+
+
+def test_pleasantry_detection():
+    from line_local_mcp.pipeline import _is_pleasantry
+
+    def ev(*texts, att=False):
+        return {"messages": [{"text": t} for t in texts], "attachments": [{"kind": "image"}] if att else []}
+
+    assert _is_pleasantry(ev("好的，感謝"))
+    assert _is_pleasantry(ev("感謝", "恩恩"))
+    assert _is_pleasantry(ev("OK👍"))
+    assert not _is_pleasantry(ev("好的", att=True))
+    assert not _is_pleasantry(ev("剛印出來的今天要寄的，再麻煩了"))
+    assert not _is_pleasantry(ev("好的，3箱"))
+    assert not _is_pleasantry(ev(""))
