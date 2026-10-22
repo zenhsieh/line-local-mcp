@@ -172,6 +172,12 @@ closed.
 | `text/*`, `application/json`, `+json`, `+xml` | UTF-8 text, passed through the redactor |
 | anything else on the allow list | an opaque `line-archive://media/<id>` embedded resource |
 
+For PNG/JPEG/GIF images the header text also carries `width`, `height` and `thumb`
+(same values in the header block's `_meta.line_media`), read from the file header
+without decoding. The archive often serves LINE's cached preview instead of the
+original (e.g. a 267 px wide JPEG); when both sides are ≤ 320 px the header says
+`thumb=true` and adds a warning that this is a preview, not the original.
+
 Nothing is written to disk. `LINE_MCP_MAX_MEDIA_BYTES` (default 4 MiB) caps one
 attachment independently of `LINE_MCP_MAX_RESPONSE_BYTES`, and oversized attachments
 are refused rather than truncated.

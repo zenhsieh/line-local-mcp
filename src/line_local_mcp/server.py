@@ -184,6 +184,8 @@ def create_server(
 
             Images are returned as viewable image content and text-like files as redacted
             text. Other allowed types are returned as an opaque embedded resource.
+            Image headers report width/height and thumb=true when the archive only had
+            LINE's small preview (both sides <= 320 px), which is not the original.
             """
             payload = client.fetch_media(media_id)
             return to_content_blocks(payload, redactor, settings.media_mime_allow)

@@ -7,6 +7,7 @@ from line_local_mcp.media import (
     DEFAULT_MIME_ALLOW,
     MediaError,
     MediaPayload,
+    image_size,
     is_textual,
     mime_allowed,
     normalize_media_id,
@@ -130,3 +131,75 @@ def test_header_metadata_is_redacted_too():
     payload = MediaPayload("m5", "text/plain", "password=hunter2.txt", b"hi")
     header, _ = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW)
     assert "hunter2" not in header.text
+
+
+def _png(width: int, height: int) -> bytes:
+    import struct
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13)
+        + b"IHDR"
+        + struct.pack(">II", width, height)
+        + b"\x08\x02\x00\x00\x00"
+    )
+
+
+def _jpeg(width: int, height: int) -> bytes:
+    import struct
+
+    app0 = b"\xff\xe0" + struct.pack(">H", 16) + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    dqt = b"\xff\xdb" + struct.pack(">H", 4) + b"\x00\x00"
+    sof = b"\xff\xc0" + struct.pack(">HBHHB", 11, 8, height, width, 1) + b"\x01\x11\x00"
+    return b"\xff\xd8" + app0 + dqt + sof + b"\xff\xda\x00\x02" + b"\x00" * 8 + b"\xff\xd9"
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (_png(267, 132), (267, 132)),
+        (_jpeg(267, 166), (267, 166)),
+        (_jpeg(1640, 813), (1640, 813)),
+        (b"GIF89a" + bytes([0x2C, 0x01, 0x64, 0x00]), (300, 100)),
+        (b"\x89PNG\r\n\x1a\n", None),
+        (b"\xff\xd8\xff\xda\x00\x02", None),
+        (b"\xff\xd8\xff\xe0\x00", None),
+        (b"not an image", None),
+    ],
+)
+def test_image_size_reads_headers_only(data, expected):
+    assert image_size(data) == expected
+
+
+def test_preview_thumbnail_is_flagged_with_warning_and_meta():
+    payload = MediaPayload("637203087899230855", "image/jpeg", "1792633941819.jpg", _jpeg(267, 132))
+    header, body = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW)
+
+    assert "width=267, height=132, thumb=true" in header.text
+    assert "LINE 預覽縮圖（267x132），不是原圖" in header.text
+    assert header.meta == {"line_media": {"width": 267, "height": 132, "thumb": True}}
+    assert isinstance(body, ImageContent)
+
+
+def test_full_size_image_is_not_flagged():
+    payload = MediaPayload("m2", "image/jpeg", "orig.jpg", _jpeg(1640, 813))
+    header, _ = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW)
+
+    assert "thumb=false" in header.text
+    assert "縮圖" not in header.text
+    assert header.meta == {"line_media": {"width": 1640, "height": 813, "thumb": False}}
+
+
+def test_one_long_side_is_not_a_thumbnail():
+    payload = MediaPayload("m3", "image/png", "tall.png", _png(300, 1200))
+    header, _ = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW)
+
+    assert "thumb=false" in header.text
+
+
+def test_unparseable_image_keeps_the_plain_header():
+    payload = MediaPayload("m4", "image/webp", "x.webp", b"RIFF\x00\x00\x00\x00WEBP")
+    header, _ = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW)
+
+    assert "thumb=" not in header.text
+    assert header.meta is None

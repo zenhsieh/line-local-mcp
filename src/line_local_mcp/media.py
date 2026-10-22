@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import posixpath
+import struct
 from dataclasses import dataclass
 from email.message import EmailMessage
 from urllib.parse import quote
@@ -44,6 +45,21 @@ _TEXTUAL_MIMES = frozenset(
 )
 
 MEDIA_ID_MAX_LENGTH = 512
+
+# The archive's /media often serves LINE's cached *preview* instead of the original
+# picture (observed: JPEG 267 px wide, ~10 KB).  Anything this small on both sides
+# is flagged so callers do not mistake it for the original.
+THUMBNAIL_MAX_SIDE = 320
+
+THUMBNAIL_WARNING = (
+    "⚠️ 這是 LINE 預覽縮圖（{width}x{height}），不是原圖：請在 LINE 點開原圖後另存到 "
+    "syncthing inbox，或請對方重傳"
+)
+
+# JPEG start-of-frame markers that carry the frame dimensions (excludes DHT/JPG/DAC).
+_JPEG_SOF = frozenset(
+    {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+)
 
 
 class MediaError(RuntimeError):
@@ -98,6 +114,58 @@ def is_textual(mime: str) -> bool:
     return mime.startswith("text/") or mime in _TEXTUAL_MIMES or mime.endswith(("+json", "+xml"))
 
 
+def _jpeg_size(data: bytes) -> tuple[int, int] | None:
+    i = 2
+    n = len(data)
+    while i + 4 <= n:
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0xFF:  # fill byte
+            i += 1
+            continue
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:  # no length field
+            i += 2
+            continue
+        if marker in (0xD9, 0xDA):  # EOI / start of scan: no frame header seen
+            return None
+        (length,) = struct.unpack(">H", data[i + 2 : i + 4])
+        if length < 2:
+            return None
+        if marker in _JPEG_SOF:
+            if i + 9 > n:
+                return None
+            height, width = struct.unpack(">HH", data[i + 5 : i + 9])
+            return width, height
+        i += 2 + length
+    return None
+
+
+def image_size(data: bytes) -> tuple[int, int] | None:
+    """Return ``(width, height)`` from a PNG, JPEG or GIF header, or None if unknown.
+
+    Header-only parsing, no image library: the bytes are never decoded.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24 and data[12:16] == b"IHDR":
+        width, height = struct.unpack(">II", data[16:24])
+    elif data.startswith(b"\xff\xd8"):
+        size = _jpeg_size(data)
+        if size is None:
+            return None
+        width, height = size
+    elif data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        width, height = struct.unpack("<HH", data[6:10])
+    else:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def is_thumbnail(size: tuple[int, int] | None) -> bool:
+    return size is not None and max(size) <= THUMBNAIL_MAX_SIDE
+
+
 @dataclass(frozen=True)
 class MediaPayload:
     media_id: str
@@ -127,11 +195,20 @@ def to_content_blocks(
         "filename": payload.filename or "(none)",
     }
     described = redactor.redact(summary)
-    header = TextContent(
-        type="text",
-        text="LINE attachment "
-        + ", ".join(f"{key}={described[key]}" for key in ("media_id", "filename", "mime", "bytes")),
+    text = "LINE attachment " + ", ".join(
+        f"{key}={described[key]}" for key in ("media_id", "filename", "mime", "bytes")
     )
+    meta: dict[str, object] | None = None
+    if payload.mime.startswith("image/"):
+        size = image_size(payload.data)
+        if size is not None:
+            width, height = size
+            thumb = is_thumbnail(size)
+            text += f", width={width}, height={height}, thumb={'true' if thumb else 'false'}"
+            meta = {"line_media": {"width": width, "height": height, "thumb": thumb}}
+            if thumb:
+                text += "\n" + THUMBNAIL_WARNING.format(width=width, height=height)
+    header = TextContent(type="text", text=text, _meta=meta)
 
     if payload.mime.startswith("image/"):
         body: ContentBlock = ImageContent(
