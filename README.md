@@ -177,8 +177,10 @@ For PNG/JPEG/GIF images the header text also carries `width`, `height` and `thum
 without decoding. The archive often serves LINE's cached preview instead of the
 original (e.g. a 267 px wide JPEG); when both sides are ≤ 320 px the header says
 `thumb=true` and adds a warning that this is a preview, not the original.
-By default, `line_read_media` JPEG-encodes images with a 1280 px maximum side;
-`max_side=0` returns the archive bytes unchanged when small text needs a closer look.
+By default, `line_read_media` resizes images whose long side exceeds 1280 px
+and JPEG-encodes the smaller copy. Images already within the limit keep their
+original bytes and MIME. `max_side=0` always returns the archive bytes unchanged
+when small text needs a closer look.
 
 Nothing is written to disk. `LINE_MCP_MAX_MEDIA_BYTES` (default 4 MiB) caps one
 attachment independently of `LINE_MCP_MAX_RESPONSE_BYTES`, and oversized attachments

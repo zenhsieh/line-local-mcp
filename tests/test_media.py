@@ -220,3 +220,14 @@ def test_large_image_defaults_to_jpeg_1280_and_zero_restores_original():
     _, full = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW, max_side=0)
     assert full.mime_type == "image/png"
     assert base64.b64decode(full.data) == original.getvalue()
+
+
+def test_small_png_keeps_original_bytes_and_mime():
+    original = BytesIO()
+    Image.new("RGB", (800, 600), "white").save(original, format="PNG")
+    payload = MediaPayload("m6", "image/png", "screenshot.png", original.getvalue())
+    header, body = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW)
+    assert "width=800, height=600, thumb=false" in header.text
+    assert "sent_width" not in header.text
+    assert body.mime_type == "image/png"
+    assert base64.b64decode(body.data) == original.getvalue()

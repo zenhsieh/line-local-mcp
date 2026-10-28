@@ -194,8 +194,9 @@ def create_server(
             text. Other allowed types are returned as an opaque embedded resource.
             Image headers report width/height and thumb=true when the archive only had
             LINE's small preview (both sides <= 320 px), which is not the original.
-            Images are JPEG-encoded at a maximum side of 1280 px by default. If text is
-            unclear, read it again with max_side=0 for the original bytes.
+            Images larger than 1280 px are resized and JPEG-encoded by default;
+            smaller images retain original bytes. If text is unclear, read it again
+            with max_side=0 for the original bytes.
             """
             payload = client.fetch_media(media_id)
             return to_content_blocks(payload, redactor, settings.media_mime_allow, max_side=max_side)

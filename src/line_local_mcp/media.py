@@ -211,29 +211,26 @@ def to_content_blocks(
             meta = {"line_media": {"width": width, "height": height, "thumb": thumb}}
             if thumb:
                 text += "\n" + THUMBNAIL_WARNING.format(width=width, height=height)
-        if max_side and size is not None:
+        if max_side and size is not None and max(size) > max_side:
             from io import BytesIO
 
             from PIL import Image, ImageOps, UnidentifiedImageError
 
             try:
                 with Image.open(BytesIO(payload.data)) as source:
-                    # Keep small archived previews unchanged; lossy recompression cannot
-                    # restore detail that LINE omitted from the source archive.
-                    if not is_thumbnail(size):
-                        image = ImageOps.exif_transpose(source)
-                        image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-                        if image.mode not in ("RGB", "L"):
-                            background = Image.new("RGB", image.size, "white")
-                            if "A" in image.getbands():
-                                background.paste(image, mask=image.getchannel("A"))
-                            else:
-                                background.paste(image.convert("RGB"))
-                            image = background
-                        output = BytesIO()
-                        image.save(output, format="JPEG", quality=82, optimize=True)
-                        image_data, image_mime = output.getvalue(), "image/jpeg"
-                        text += f", sent_width={image.width}, sent_height={image.height}"
+                    image = ImageOps.exif_transpose(source)
+                    image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                    if image.mode not in ("RGB", "L"):
+                        background = Image.new("RGB", image.size, "white")
+                        if "A" in image.getbands():
+                            background.paste(image, mask=image.getchannel("A"))
+                        else:
+                            background.paste(image.convert("RGB"))
+                        image = background
+                    output = BytesIO()
+                    image.save(output, format="JPEG", quality=82, optimize=True)
+                    image_data, image_mime = output.getvalue(), "image/jpeg"
+                    text += f", sent_width={image.width}, sent_height={image.height}"
             except (OSError, UnidentifiedImageError):
                 # Some archives carry a parseable image header but truncated bytes.
                 # Preserve the original rather than drop the attachment.
