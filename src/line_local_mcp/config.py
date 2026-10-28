@@ -29,6 +29,7 @@ class Settings:
     media_mode: str
     max_media_bytes: int
     media_mime_allow: tuple[str, ...]
+    self_sender_id: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -92,4 +93,5 @@ class Settings:
             media_mode=media_mode,
             max_media_bytes=int(os.getenv("LINE_MCP_MAX_MEDIA_BYTES", "4194304")),
             media_mime_allow=media_mime_allow,
+            self_sender_id=os.getenv("LINE_MCP_SELF_SENDER_ID", "").strip(),
         )

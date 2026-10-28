@@ -11,6 +11,7 @@ from mcp.types import ContentBlock
 from .aliases import AliasFileError, ContactAliases, ResolvedContact
 from .client import LineApiError, LineArchiveClient
 from .config import Settings
+from .formatting import format_archive_result
 from .media import MediaError, to_content_blocks
 from .redaction import RedactionError, Redactor
 
@@ -51,6 +52,13 @@ def create_server(
     aliases = aliases or ContactAliases.load(settings.aliases_file)
     redactor = Redactor(settings.redaction_mode, settings.redactor_command)
     client = client or LineArchiveClient(settings, redactor)
+
+    def _text_result(result: Any, kind: str, output_format: str) -> Any:
+        if output_format == "json":
+            return result
+        if output_format != "text":
+            raise ValueError("format must be text or json")
+        return format_archive_result(result, kind=kind, self_sender_id=settings.self_sender_id)
 
     mcp = MCPServer(
         "LINE Local Archive",
@@ -111,30 +119,30 @@ def create_server(
 
     @mcp.tool()
     @_reported
-    def line_list_chats(limit: int = 30) -> Any:
+    def line_list_chats(limit: int = 30, format: str = "text") -> Any:
         """List recently active LINE contacts and groups."""
-        return client.request("GET", "/chats", {"limit": _limit(limit)})
+        return _text_result(client.request("GET", "/chats", {"limit": _limit(limit)}), "chats", format)
 
     @mcp.tool()
     @_reported
-    def line_list_recent_messages(limit: int = 30) -> Any:
+    def line_list_recent_messages(limit: int = 30, format: str = "text") -> Any:
         """List recent messages across chats."""
-        return client.request("GET", "/recent", {"limit": _limit(limit)})
+        return _text_result(client.request("GET", "/recent", {"limit": _limit(limit)}), "recent", format)
 
     @mcp.tool()
     @_reported
-    def line_list_unread() -> Any:
+    def line_list_unread(format: str = "text") -> Any:
         """List unread messages recorded by the local archive."""
-        return client.request("GET", "/unread")
+        return _text_result(client.request("GET", "/unread"), "unread", format)
 
     @mcp.tool()
     @_reported
-    def line_search_messages(query: str, limit: int = 30) -> Any:
+    def line_search_messages(query: str, limit: int = 30, format: str = "text") -> Any:
         """Search message text across the local LINE archive."""
         query = query.strip()
         if not query:
             raise ValueError("query must not be empty")
-        return client.request("GET", "/search", {"q": query, "limit": _limit(limit)})
+        return _text_result(client.request("GET", "/search", {"q": query, "limit": _limit(limit)}), "search", format)
 
     @mcp.tool()
     @_reported
@@ -150,15 +158,15 @@ def create_server(
 
     @mcp.tool()
     @_reported
-    def line_get_messages(contact: str, limit: int = 50) -> Any:
+    def line_get_messages(contact: str, limit: int = 50, format: str = "text") -> Any:
         """Get messages from a contact or group, honoring configured display-name aliases."""
-        return _for_contact("/chat", aliases.resolve(contact), {"limit": _limit(limit)})
+        return _text_result(_for_contact("/chat", aliases.resolve(contact), {"limit": _limit(limit)}), "chat", format)
 
     if settings.media_mode in {"metadata", "full"}:
 
         @mcp.tool()
         @_reported
-        def line_list_attachments(contact: str = "", kind: str = "", limit: int = 30) -> Any:
+        def line_list_attachments(contact: str = "", kind: str = "", limit: int = 30, format: str = "text") -> Any:
             """List image, video, audio, and file attachments recorded by the local archive.
 
             Returns metadata only. Use line_read_media to load one attachment's content.
@@ -170,25 +178,27 @@ def create_server(
             if kind:
                 params["kind"] = kind
             if not contact.strip():
-                return client.request("GET", "/attachments", params)
-            return _for_contact(
+                return _text_result(client.request("GET", "/attachments", params), "attachments", format)
+            return _text_result(_for_contact(
                 "/attachments", aliases.resolve(contact), params, empty_key="attachments"
-            )
+            ), "attachments", format)
 
     if settings.media_mode == "full":
 
         @mcp.tool()
         @_reported
-        def line_read_media(media_id: str) -> list[ContentBlock]:
+        def line_read_media(media_id: str, max_side: int = 1280) -> list[ContentBlock]:
             """Read one archived attachment by the media_id from line_list_attachments.
 
             Images are returned as viewable image content and text-like files as redacted
             text. Other allowed types are returned as an opaque embedded resource.
             Image headers report width/height and thumb=true when the archive only had
             LINE's small preview (both sides <= 320 px), which is not the original.
+            Images are JPEG-encoded at a maximum side of 1280 px by default. If text is
+            unclear, read it again with max_side=0 for the original bytes.
             """
             payload = client.fetch_media(media_id)
-            return to_content_blocks(payload, redactor, settings.media_mime_allow)
+            return to_content_blocks(payload, redactor, settings.media_mime_allow, max_side=max_side)
 
     return mcp
 

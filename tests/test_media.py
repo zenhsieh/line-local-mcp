@@ -1,7 +1,9 @@
 import base64
+from io import BytesIO
 
 import pytest
 from mcp.types import EmbeddedResource, ImageContent, TextContent
+from PIL import Image
 
 from line_local_mcp.media import (
     DEFAULT_MIME_ALLOW,
@@ -203,3 +205,18 @@ def test_unparseable_image_keeps_the_plain_header():
 
     assert "thumb=" not in header.text
     assert header.meta is None
+
+
+def test_large_image_defaults_to_jpeg_1280_and_zero_restores_original():
+    original = BytesIO()
+    Image.new("RGB", (2400, 1200), "blue").save(original, format="PNG")
+    payload = MediaPayload("m5", "image/png", "phone.png", original.getvalue())
+    header, image = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW)
+    assert "width=2400, height=1200, thumb=false" in header.text
+    assert "sent_width=1280, sent_height=640" in header.text
+    assert image.mime_type == "image/jpeg"
+    with Image.open(BytesIO(base64.b64decode(image.data))) as decoded:
+        assert decoded.size == (1280, 640)
+    _, full = to_content_blocks(payload, Redactor("basic"), DEFAULT_MIME_ALLOW, max_side=0)
+    assert full.mime_type == "image/png"
+    assert base64.b64decode(full.data) == original.getvalue()

@@ -177,6 +177,8 @@ For PNG/JPEG/GIF images the header text also carries `width`, `height` and `thum
 without decoding. The archive often serves LINE's cached preview instead of the
 original (e.g. a 267 px wide JPEG); when both sides are ≤ 320 px the header says
 `thumb=true` and adds a warning that this is a preview, not the original.
+By default, `line_read_media` JPEG-encodes images with a 1280 px maximum side;
+`max_side=0` returns the archive bytes unchanged when small text needs a closer look.
 
 Nothing is written to disk. `LINE_MCP_MAX_MEDIA_BYTES` (default 4 MiB) caps one
 attachment independently of `LINE_MCP_MAX_RESPONSE_BYTES`, and oversized attachments
@@ -207,6 +209,11 @@ export LINE_MCP_MEDIA_MIME_ALLOW='image/*,text/*,application/pdf,application/zip
 - `line_get_messages`
 - `line_list_attachments` (media mode `metadata` or `full`)
 - `line_read_media` (media mode `full`)
+
+The six list/search/message tools return compact text by default. Pass
+`format="json"` for the original structured response. Set
+`LINE_MCP_SELF_SENDER_ID` to the archive's own sender id to show it as `我`;
+other senders retain their archive display names.
 
 ## Optional event pipeline
 
@@ -275,6 +282,7 @@ safe migration procedure from a project-specific watcher.
 | `LINE_API_BASE` | yes | — |
 | `LINE_API_TOKEN` or `LINE_API_TOKEN_COMMAND` | yes | — |
 | `LINE_MCP_ALIASES_FILE` | no | — |
+| `LINE_MCP_SELF_SENDER_ID` | no | — |
 | `LINE_MCP_REDACTION_MODE` | no | `basic` |
 | `LINE_MCP_REDACTOR_COMMAND` | external mode | — |
 | `LINE_MCP_TIMEOUT` | no | `30` seconds |

@@ -179,9 +179,11 @@ class MediaPayload:
 
 
 def to_content_blocks(
-    payload: MediaPayload, redactor: Redactor, allow: tuple[str, ...]
+    payload: MediaPayload, redactor: Redactor, allow: tuple[str, ...], max_side: int = 1280
 ) -> list[ContentBlock]:
     """Render one attachment as MCP content, refusing MIME types outside the allow list."""
+    if max_side < 0:
+        raise ValueError("max_side must be zero or greater")
     if not mime_allowed(payload.mime, allow):
         raise MediaError(
             f"attachment {payload.media_id!r} has MIME type {payload.mime!r}, which is not in "
@@ -199,6 +201,7 @@ def to_content_blocks(
         f"{key}={described[key]}" for key in ("media_id", "filename", "mime", "bytes")
     )
     meta: dict[str, object] | None = None
+    image_data, image_mime = payload.data, payload.mime
     if payload.mime.startswith("image/"):
         size = image_size(payload.data)
         if size is not None:
@@ -208,13 +211,40 @@ def to_content_blocks(
             meta = {"line_media": {"width": width, "height": height, "thumb": thumb}}
             if thumb:
                 text += "\n" + THUMBNAIL_WARNING.format(width=width, height=height)
+        if max_side and size is not None:
+            from io import BytesIO
+
+            from PIL import Image, ImageOps, UnidentifiedImageError
+
+            try:
+                with Image.open(BytesIO(payload.data)) as source:
+                    # Keep small archived previews unchanged; lossy recompression cannot
+                    # restore detail that LINE omitted from the source archive.
+                    if not is_thumbnail(size):
+                        image = ImageOps.exif_transpose(source)
+                        image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                        if image.mode not in ("RGB", "L"):
+                            background = Image.new("RGB", image.size, "white")
+                            if "A" in image.getbands():
+                                background.paste(image, mask=image.getchannel("A"))
+                            else:
+                                background.paste(image.convert("RGB"))
+                            image = background
+                        output = BytesIO()
+                        image.save(output, format="JPEG", quality=82, optimize=True)
+                        image_data, image_mime = output.getvalue(), "image/jpeg"
+                        text += f", sent_width={image.width}, sent_height={image.height}"
+            except (OSError, UnidentifiedImageError):
+                # Some archives carry a parseable image header but truncated bytes.
+                # Preserve the original rather than drop the attachment.
+                pass
     header = TextContent(type="text", text=text, _meta=meta)
 
     if payload.mime.startswith("image/"):
         body: ContentBlock = ImageContent(
             type="image",
-            data=base64.b64encode(payload.data).decode("ascii"),
-            mimeType=payload.mime,
+            data=base64.b64encode(image_data).decode("ascii"),
+            mimeType=image_mime,
         )
     elif is_textual(payload.mime):
         body = TextContent(

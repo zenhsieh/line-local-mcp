@@ -1,4 +1,5 @@
 import dataclasses
+import json
 from typing import Any
 
 import pytest
@@ -84,6 +85,17 @@ async def test_get_messages_falls_back_from_old_to_canonical_name(settings):
         )
     assert not result.is_error
     assert [call[2]["name"] for call in fake.calls] == ["Old Name", "New Name"]
+
+
+@pytest.mark.asyncio
+async def test_text_default_and_json_escape_hatch(settings):
+    server = create_server(settings, FakeClient(), ContactAliases())
+    async with Client(server) as client:
+        compact = await client.call_tool("line_get_messages", {"contact": "New Name"})
+        original = await client.call_tool("line_get_messages", {"contact": "New Name", "format": "json"})
+    assert "hello" in compact.content[0].text
+    assert "contact_resolution" not in compact.content[0].text
+    assert json.loads(original.content[0].text)["messages"][0]["text"] == "hello"
 
 
 
