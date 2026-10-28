@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -203,8 +204,67 @@ def stamp_completed_tasks(profile: Profile, now: datetime | None = None) -> dict
     return {"stamped": stamped, "retained": retained, "reopened": reopened}
 
 
+def _event_items(event: dict[str, Any]) -> list[tuple[dict[str, Any], bool]]:
+    """(item, is_attachment) for every message/attachment in one inbox event."""
+
+    return [(m, False) for m in event.get("messages", [])] + [
+        (a, True) for a in event.get("attachments", [])
+    ]
+
+
+def _message_fingerprint(line_fingerprint: str, index: int) -> str:
+    """Stable per-message id, derived from the line's own fingerprint.
+
+    Kept as a 64-hex-char sha256 so it satisfies EVENT_MARKER_RE/
+    EVENT_FINGERPRINT_RE exactly like the pre-2026-09-21 line-level
+    fingerprints did -- nothing downstream needs to know the format changed.
+    """
+
+    return hashlib.sha256(f"{line_fingerprint}:{index}".encode()).hexdigest()
+
+
+def _inbox_message_index(profile: Profile) -> dict[str, dict[str, Any]]:
+    """fingerprint -> the single-item pseudo-event a durable task marker points at.
+
+    Covers both eras: the bare line fingerprint for tasks created before
+    2026-09-21 (one task per whole poll batch), and the per-message
+    fingerprint `reconcile_todos` now uses (one task per message/attachment).
+    Consumers that resolve a marker back to "what did this task refer to"
+    (`mark_replied_tasks`, `_task_archive_status`) work unchanged either way.
+    """
+
+    index: dict[str, dict[str, Any]] = {}
+    for line_fingerprint, event in inbox_rows(profile):
+        items = _event_items(event)
+        if not items:
+            continue
+        index[line_fingerprint] = event
+        for msg_index, (item, is_attachment) in enumerate(items):
+            fingerprint = _message_fingerprint(line_fingerprint, msg_index)
+            index[fingerprint] = {"attachments": [item]} if is_attachment else {"messages": [item]}
+    return index
+
+
 def reconcile_todos(profile: Profile) -> dict[str, int]:
-    """Create exactly one durable task per inbox event across retries/deletion."""
+    """Create exactly one durable task per inbox message across retries/deletion.
+
+    2026-09-21: this used to create one task per inbox *event* (one poll
+    batch), with `_task_summary` only ever showing the batch's first message
+    and a "+N messages" tail for the rest. That's fine when a batch really is
+    one LINE reply split across a few lines -- it's silent data loss when a
+    jsonl source like infra-fleet-alerts happens to land two *unrelated*
+    transitions in the same poll (e.g. a resolve for one alert landing next
+    to a fresh fire for a different one): the resolve's text was never
+    visible anywhere, so the alert it closed stayed shown as open
+    indefinitely (infra-ops case #220, #226 -- both genuinely resolved
+    minutes after firing, neither ever showed it). Splitting to one task per
+    message/attachment means nothing that arrives in a batch is invisible.
+
+    Fingerprints for lines already fully processed before this change keep
+    working exactly as before (checked at the line level, first) -- only
+    lines not yet seen get the new per-message treatment, so history never
+    gets reprocessed or duplicated.
+    """
 
     ensure_task_ids(profile)
     state_file = profile.state_dir / "todo-state.json"
@@ -215,26 +275,39 @@ def reconcile_todos(profile: Profile) -> dict[str, int]:
     created = recovered = 0
 
     source_name, _latest_title, _source_title = _source_labels(profile)
-    for fingerprint, event in inbox_rows(profile):
-        if fingerprint in assigned_set:
+    for line_fingerprint, event in inbox_rows(profile):
+        if line_fingerprint in assigned_set:
             continue
-        marker = EVENT_MARKER.format(fingerprint=fingerprint)
-        if marker in todo_text:
+        items = _event_items(event)
+        if not items:
+            continue
+        for index, (item, is_attachment) in enumerate(items):
+            fingerprint = _message_fingerprint(line_fingerprint, index)
+            if fingerprint in assigned_set:
+                continue
+            marker = EVENT_MARKER.format(fingerprint=fingerprint)
+            if marker in todo_text:
+                assigned.append(fingerprint)
+                assigned_set.add(fingerprint)
+                _write_private(state_file, {"assigned": assigned})
+                recovered += 1
+                continue
+            sub_event = {"attachments": [item]} if is_attachment else {"messages": [item]}
+            todo_add(
+                profile,
+                f"{_task_summary(sub_event, source_name)} {marker}",
+                status=profile.new_task_status,
+            )
+            todo_text = profile.todo_file.read_text(encoding="utf-8")
             assigned.append(fingerprint)
             assigned_set.add(fingerprint)
             _write_private(state_file, {"assigned": assigned})
-            recovered += 1
-            continue
-        todo_add(
-            profile,
-            f"{_task_summary(event, source_name)} {marker}",
-            status=profile.new_task_status,
-        )
-        todo_text = profile.todo_file.read_text(encoding="utf-8")
-        assigned.append(fingerprint)
-        assigned_set.add(fingerprint)
+            created += 1
+        # every message in this line now has its own durable task (or was
+        # already recovered) -- skip re-scanning it message-by-message next time.
+        assigned.append(line_fingerprint)
+        assigned_set.add(line_fingerprint)
         _write_private(state_file, {"assigned": assigned})
-        created += 1
 
     completion = stamp_completed_tasks(profile)
     return {
@@ -273,7 +346,7 @@ def mark_replied_tasks(profile: Profile) -> dict[str, int]:
     task looked reassuringly "handled".
     """
     lines = ensure_task_ids(profile)
-    events = dict(inbox_rows(profile))
+    events = _inbox_message_index(profile)
     outgoing_times = sorted(
         {
             str(message.get("time", ""))
