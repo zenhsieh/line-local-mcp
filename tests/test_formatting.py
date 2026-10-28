@@ -31,3 +31,22 @@ def test_compact_chats_and_unread():
     data = {"chats": [{"chatId": "c", "name": "欣晴", "time": "2026-10-28 10:00", "unread": 2, "last": "後續"}], "unread_total": 2, "unread_chats": 1}
     assert "欣晴 未讀2 後續" in format_archive_result(data, kind="chats", current_year=2026)
     assert "未讀 2／對話 1" in format_archive_result(data, kind="unread", current_year=2026)
+
+
+def test_multiple_chats_use_short_labels_without_repeating_ids():
+    data = {"attachments": [
+        {"chatId": "long-id-a", "from": "甲", "time": "2026-10-28 10:00", "kind": "image", "media_id": "m1"},
+        {"chatId": "long-id-b", "from": "乙", "time": "2026-10-28 10:01", "kind": "image", "media_id": "m2"},
+        {"chatId": "long-id-a", "from": "甲", "time": "2026-10-28 10:02", "kind": "image", "media_id": "m3"},
+    ]}
+    output = format_archive_result(data, kind="attachments", current_year=2026)
+    assert output.count("long-id-a") == 1
+    assert output.count("long-id-b") == 1
+    assert "#1 甲：[圖 m3]" in output
+
+
+def test_sender_equal_to_chat_id_does_not_repeat_opaque_id():
+    data = {"messages": [{"chatId": "opaque-33", "from": "opaque-33", "time": "2026-10-28 10:00", "type": "text", "text": "請看"}]}
+    output = format_archive_result(data, kind="recent", current_year=2026)
+    assert output.count("opaque-33") == 1
+    assert "對方：請看" in output

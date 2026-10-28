@@ -20,7 +20,11 @@ def _when(value: Any, current_year: int) -> str:
 
 def _sender(row: dict[str, Any], self_sender_id: str) -> str:
     sender = str(row.get("from") or row.get("sender") or "")
-    return "我" if self_sender_id and sender == self_sender_id else sender or "?"
+    if self_sender_id and sender == self_sender_id:
+        return "我"
+    if sender and sender == str(row.get("chatId") or ""):
+        return str(row.get("chat") or row.get("name") or "對方")
+    return sender or "?"
 
 
 def _attachment(row: dict[str, Any]) -> str:
@@ -53,8 +57,10 @@ def format_archive_result(
         chat_name = str(row.get("chat") or row.get("name") or "")
         if chat_id and chat_id not in chats:
             chats[chat_id] = chat_name
+    chat_labels = {chat_id: f"#{index}" for index, chat_id in enumerate(chats, start=1)}
     for chat_id, chat_name in chats.items():
-        lines.append(f"對話 {chat_name + ' ' if chat_name else ''}chatId={chat_id}")
+        label = chat_labels[chat_id] + " " if len(chats) > 1 else ""
+        lines.append(f"對話 {label}{chat_name + ' ' if chat_name else ''}chatId={chat_id}")
     resolution = result.get("contact_resolution")
     if isinstance(resolution, dict):
         lines.append(
@@ -87,6 +93,6 @@ def format_archive_result(
                 body_text = "（已收回）" if message_type == "text" else _attachment(row)
             body = f"{speaker}：{body_text}"
         if len(chats) > 1 and kind not in {"chats", "unread"}:
-            body = f"{chat or row.get('chatId') or '?'} {body}"
+            body = f"{chat_labels.get(str(row.get('chatId') or ''), '?')} {body}"
         lines.append(f"{when} {body}".strip())
     return "\n".join(lines) if lines else "（無資料）"
