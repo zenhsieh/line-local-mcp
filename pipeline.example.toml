@@ -4,7 +4,7 @@ mirror_db = "~/.local/state/line-local-pipeline/mirror.sqlite"
 chats = ["Canonical Contact", "Another Contact"]
 poll_limit = 200
 trigger_sync = true
-env = { LINE_API_BASE = "https://archive.example.ts.net", LINE_API_TOKEN_COMMAND = "~/.local/bin/line-local-token" }
+env = { LINE_API_BASE = "https://archive.example.ts.net", LINE_API_TOKEN_FILE = "/home/you/.local/state/line-local-mcp/token" }
 
 # Copy outside the repository. Profiles have isolated state, aliases and tasks.
 [profiles.example]

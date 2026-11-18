@@ -25,6 +25,16 @@ def test_allows_loopback_http(monkeypatch):
     assert settings.api_base == "http://127.0.0.1:8765"
 
 
+def test_accepts_token_file_without_printing_command(monkeypatch):
+    monkeypatch.setenv("LINE_API_BASE", "http://127.0.0.1:8765")
+    monkeypatch.delenv("LINE_API_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_API_TOKEN_COMMAND", raising=False)
+    monkeypatch.setenv("LINE_API_TOKEN_FILE", "/private/token")
+    settings = Settings.from_env()
+    assert settings.token_file == "/private/token"
+    assert settings.token_command is None
+
+
 
 def _base_env(monkeypatch):
     monkeypatch.setenv("LINE_API_BASE", "http://127.0.0.1:8765")

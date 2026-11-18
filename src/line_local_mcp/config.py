@@ -30,6 +30,7 @@ class Settings:
     max_media_bytes: int
     media_mime_allow: tuple[str, ...]
     self_sender_id: str = ""
+    token_file: str | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -48,11 +49,12 @@ class Settings:
             )
 
         api_token = os.getenv("LINE_API_TOKEN", "").strip() or None
+        token_file = os.getenv("LINE_API_TOKEN_FILE", "").strip() or None
         token_raw = os.getenv("LINE_API_TOKEN_COMMAND", "").strip()
         token_command = tuple(shlex.split(token_raw)) if token_raw else None
-        if not api_token and not token_command:
+        if not api_token and not token_file and not token_command:
             raise ConfigurationError(
-                "Set LINE_API_TOKEN or LINE_API_TOKEN_COMMAND; secrets are never read from files"
+                "Set LINE_API_TOKEN, LINE_API_TOKEN_FILE, or LINE_API_TOKEN_COMMAND"
             )
 
         redaction_mode = os.getenv("LINE_MCP_REDACTION_MODE", "basic").strip().lower()
@@ -84,6 +86,7 @@ class Settings:
         return cls(
             api_base=api_base,
             api_token=api_token,
+            token_file=token_file,
             token_command=token_command,
             aliases_file=os.getenv("LINE_MCP_ALIASES_FILE", "").strip() or None,
             redaction_mode=redaction_mode,

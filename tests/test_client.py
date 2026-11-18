@@ -78,6 +78,35 @@ def test_fetch_media_returns_bytes_mime_and_bearer_token(client, archive):
     assert archive.seen[0] == ("/media?id=m1", "Bearer test-token")
 
 
+def test_token_file_is_read_without_running_command(client, tmp_path, monkeypatch):
+    token_path = tmp_path / "token"
+    token_path.write_text("file-token\n")
+    token_path.chmod(0o600)
+    settings = dataclasses.replace(client.settings, api_token=None, token_file=str(token_path), token_command=("false",))
+    monkeypatch.setattr("line_local_mcp.client.subprocess.run", lambda *a, **k: pytest.fail("command ran"))
+    assert LineArchiveClient(settings, client.redactor)._token() == "file-token"
+
+
+@pytest.mark.parametrize("unsafe", ["mode", "symlink", "directory"])
+def test_token_file_rejects_unsafe_sources(client, tmp_path, unsafe):
+    token_path = tmp_path / "token"
+    if unsafe == "directory":
+        token_path.mkdir()
+    else:
+        actual = tmp_path / "actual"
+        actual.write_text("test-secret")
+        actual.chmod(0o600)
+        if unsafe == "symlink":
+            token_path.symlink_to(actual)
+        else:
+            token_path = actual
+            token_path.chmod(0o644)
+    settings = dataclasses.replace(client.settings, api_token=None, token_file=str(token_path))
+    with pytest.raises(LineApiError) as error:
+        LineArchiveClient(settings, client.redactor)._token()
+    assert "test-secret" not in str(error.value)
+
+
 def test_fetch_media_uses_content_disposition_to_type_opaque_bytes(client):
     payload = client.fetch_media("named")
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import urllib.error
 import urllib.parse
@@ -28,6 +30,28 @@ class LineArchiveClient:
     def _token(self) -> str:
         if self.settings.api_token:
             return self.settings.api_token
+        if self.settings.token_file:
+            try:
+                flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+                fd = os.open(self.settings.token_file, flags)
+                try:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                        raise LineApiError("token file must be owner-owned, regular, and mode 0600")
+                    raw = os.read(fd, 4097)
+                finally:
+                    os.close(fd)
+            except OSError as exc:
+                raise LineApiError("cannot read token file") from exc
+            if not raw or len(raw) > 4096:
+                raise LineApiError("token file is empty or too large")
+            try:
+                token = raw.decode("utf-8").strip()
+            except UnicodeDecodeError as exc:
+                raise LineApiError("token file is not UTF-8") from exc
+            if not token or "\n" in token or "\r" in token:
+                raise LineApiError("token file has invalid content")
+            return token
         if not self.settings.token_command:
             raise LineApiError("no token source is configured")
         try:

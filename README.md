@@ -77,13 +77,14 @@ from the extension.
 
 ## Install for Claude Code
 
-The safest token setup uses a command that prints a short-lived or locally stored
-token to stdout:
+Store the token in an owner-owned regular file with mode 0600, then pass only
+its path to the MCP process. Do not paste the token into a shell command or
+run a token-printing command in an agent terminal.
 
 ```bash
 claude mcp add --scope user --transport stdio line-local \
   --env LINE_API_BASE=https://your-private-archive.example \
-  --env 'LINE_API_TOKEN_COMMAND=your-password-manager read line-archive-token' \
+  --env LINE_API_TOKEN_FILE=/home/you/.local/state/line-local-mcp/token \
   -- uvx --from git+https://github.com/zenhsieh/line-local-mcp line-local-mcp
 ```
 
@@ -282,7 +283,7 @@ safe migration procedure from a project-specific watcher.
 | Variable | Required | Default |
 |---|---:|---|
 | `LINE_API_BASE` | yes | — |
-| `LINE_API_TOKEN` or `LINE_API_TOKEN_COMMAND` | yes | — |
+| `LINE_API_TOKEN`, `LINE_API_TOKEN_FILE`, or legacy `LINE_API_TOKEN_COMMAND` | yes | — |
 | `LINE_MCP_ALIASES_FILE` | no | — |
 | `LINE_MCP_SELF_SENDER_ID` | no | — |
 | `LINE_MCP_REDACTION_MODE` | no | `basic` |
